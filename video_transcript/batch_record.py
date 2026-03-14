@@ -6,15 +6,21 @@
   因此只需打开第一课，用 captureStream 持续录音，
   监听 video ended 事件自动切分文件，从 DOM 读取课名命名。
 
+特性：
+  - --max-courses N 录到指定数量自动停止
+  - Ctrl+C 随时手动终止，已完成文件保留
+  - 边录边转：每录完一课自动后台启动 Whisper + Haiku 转录
+  - Ctrl+C 时等待正在进行的转录完成后才退出
+
 用法:
-    # 最小验证：只录 2 节短课（约 10 分钟）
+    # 验证：录 2 节课，检查录音和转录效果
     python batch_record.py --url "第一课URL" --max-courses 2
 
     # 正式录制：从指定课开始，一直录到章节结束
     python batch_record.py --url "起始课URL"
 
-    # 恢复录制（从上次中断处继续）
-    python batch_record.py --resume
+    # 恢复录制（需指定从哪课继续）
+    python batch_record.py --resume --url "下一课URL"
 
     # 查看进度
     python batch_record.py --status
@@ -27,6 +33,7 @@
     - captureStream 直接捕获视频音轨，插耳机不影响录音
     - 录制期间可随时 Ctrl+C 终止，不会产生不完整的录音文件
     - 输出 ogg/opus 64kbps（约 0.5MB/分钟），需安装 ffmpeg
+    - 转录需要 ANTHROPIC_API_KEY 环境变量（用于 Haiku 语义分段）
 """
 
 import argparse
@@ -51,6 +58,7 @@ OUTPUT_DIR = SCRIPT_DIR / "output"
 # 全局状态
 _shutdown_requested = False
 _current_page = None
+_transcribe_processes = []  # (subprocess.Popen, course_name) 元组列表
 
 
 def sanitize_filename(name: str, index: int) -> str:
@@ -117,7 +125,9 @@ def display_progress(progress: dict):
         name = c["name"]
         status = c["status"]
         mark = {"completed": "done", "recording": "REC ", "error": "ERR ", "pending": "    "}
-        print(f"  [{mark.get(status, '    ')}] {idx:02d} {name}")
+        ts = c.get("transcribe_status", "")
+        ts_mark = {"running": " [转录中]", "completed": " [已转录]", "error": " [转录失败]"}.get(ts, "")
+        print(f"  [{mark.get(status, '    ')}] {idx:02d} {name}{ts_mark}")
 
     print("-" * 55)
     pending = total - completed
@@ -303,6 +313,57 @@ def convert_to_ogg(webm_path: Path, ogg_path: Path) -> bool:
         return False
 
 
+def start_background_transcribe(audio_path: Path, course_name: str):
+    """在后台启动 Whisper + Haiku 转录进程"""
+    global _transcribe_processes
+
+    transcribe_script = SCRIPT_DIR / "transcribe.py"
+    cmd = [
+        sys.executable, str(transcribe_script),
+        "--input", str(audio_path),
+        "--smart-segment",
+        "--title", course_name,
+    ]
+    print(f"  后台转录启动: {course_name}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    _transcribe_processes.append((proc, course_name, audio_path))
+
+
+def wait_for_transcriptions():
+    """等待所有后台转录进程完成（Ctrl+C 退出前调用）"""
+    global _transcribe_processes
+
+    # 先清理已完成的
+    still_running = []
+    for proc, name, path in _transcribe_processes:
+        if proc.poll() is None:
+            still_running.append((proc, name, path))
+        else:
+            md_path = path.with_suffix(".md")
+            if proc.returncode == 0 and md_path.exists():
+                print(f"  转录已完成: {name} → {md_path.name}")
+            else:
+                print(f"  转录失败: {name} (退出码: {proc.returncode})")
+
+    if not still_running:
+        return
+
+    print(f"\n正在等待 {len(still_running)} 个转录任务完成...")
+    for proc, name, path in still_running:
+        print(f"  等待转录: 《{name}》...")
+        proc.wait()
+        md_path = path.with_suffix(".md")
+        if proc.returncode == 0 and md_path.exists():
+            print(f"  转录完成: 《{name}》 → {md_path.name}")
+        else:
+            stderr = proc.stderr.read().decode() if proc.stderr else ""
+            print(f"  转录失败: 《{name}》 (退出码: {proc.returncode})")
+            if stderr:
+                print(f"    错误: {stderr[:200]}")
+
+    _transcribe_processes.clear()
+
+
 async def run_continuous(start_url: str, max_courses: int | None, progress: dict | None):
     """连续录制主循环：打开第一课，自动连播并切分文件"""
     global _shutdown_requested, _current_page
@@ -459,7 +520,12 @@ async def run_continuous(start_url: str, max_courses: int | None, progress: dict
 
             recorded_count += 1
             course_idx += 1
-            print(f"  [{recorded_count}] 完成 ✓")
+            print(f"  [{recorded_count}] 录制完成")
+
+            # 立即启动后台转录
+            start_background_transcribe(final_path, course_name)
+            courses[-1]["transcribe_status"] = "running"
+            save_progress(progress)
 
             # 等待自动连播加载下一课
             if max_courses is not None and recorded_count >= max_courses:
@@ -477,10 +543,23 @@ async def run_continuous(start_url: str, max_courses: int | None, progress: dict
         _current_page = None
         await browser.close()
 
+    # 等待所有后台转录完成
+    wait_for_transcriptions()
+
+    # 更新转录状态到 progress
+    for entry in courses:
+        if entry.get("transcribe_status") == "running":
+            md_path = Path(entry["file_path"]).with_suffix(".md") if entry.get("file_path") else None
+            if md_path and md_path.exists():
+                entry["transcribe_status"] = "completed"
+            else:
+                entry["transcribe_status"] = "error"
+    save_progress(progress)
+
     # 最终进度
     display_progress(progress)
     if _shutdown_requested:
-        print("录制已手动终止。下次运行 --resume 可继续。")
+        print("录制已手动终止。下次运行 --resume --url \"下一课URL\" 可继续。")
 
 
 async def inspect_course(url: str):
@@ -553,11 +632,11 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python batch_record.py --inspect --url "URL"        调试课名提取
-  python batch_record.py --url "URL" --max-courses 2  最小验证（录2课）
-  python batch_record.py --url "URL"                  正式录制
-  python batch_record.py --resume                     恢复录制
-  python batch_record.py --status                     查看进度
+  python batch_record.py --inspect --url "URL"          调试课名提取
+  python batch_record.py --url "URL" --max-courses 2    验证（录2课+转录）
+  python batch_record.py --url "URL"                    正式录制
+  python batch_record.py --resume --url "下一课URL"      恢复录制
+  python batch_record.py --status                       查看进度
         """
     )
     parser.add_argument("--url", type=str, help="起始课程页面 URL")
@@ -595,19 +674,18 @@ async def main():
             print("错误: 未找到 progress.json，请先用 --url 开始首次录制。")
             return
 
-        # 找到最后一个已完成课程的 URL，从下一课继续
-        completed = [c for c in progress["courses"] if c["status"] == "completed"]
-        if not completed:
-            # 没有已完成的，从 source_url 重新开始
-            start_url = progress["source_url"]
-        else:
-            # 从最后完成的课程 URL 开始（会在 wait_for_next_course 时跳到下一课）
-            last = completed[-1]
-            start_url = last["url"]
-            print(f"从上次录制位置恢复（最后完成: {last['name']}）")
+        if not args.url:
+            print("错误: --resume 需要提供 --url 指定从哪课继续。")
+            completed = [c for c in progress["courses"] if c["status"] == "completed"]
+            if completed:
+                last = completed[-1]
+                print(f"上次最后完成: {last['name']}")
+                print(f"请提供下一课的 URL: python batch_record.py --resume --url \"下一课URL\"")
+            return
 
         display_progress(progress)
-        await run_continuous(start_url, args.max_courses, progress)
+        print(f"从指定 URL 恢复录制...")
+        await run_continuous(args.url, args.max_courses, progress)
         return
 
     # 新录制

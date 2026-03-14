@@ -160,6 +160,8 @@ def main():
                         help="Whisper 模型大小 (tiny/base/small/medium/large-v3)")
     parser.add_argument("--title", type=str, default=None, help="Markdown 标题")
     parser.add_argument("--output", "-o", type=str, default=None, help="输出 Markdown 文件路径")
+    parser.add_argument("--smart-segment", action="store_true",
+                        help="使用 Haiku API 做语义分段（推荐用于课程转录）")
     args = parser.parse_args()
 
     audio_path = Path(args.input)
@@ -174,9 +176,16 @@ def main():
         print("警告: 未识别到任何语音内容")
         sys.exit(1)
 
-    # 生成 Markdown
     title = args.title or audio_path.stem
-    markdown = generate_markdown(segments, title)
+
+    if args.smart_segment:
+        # 语义分段模式：Whisper 文本 → Haiku 分段
+        raw_text = segments_to_plain_text(segments)
+        print(f"\n开始语义分段（使用 Haiku API）...")
+        markdown = smart_segment(raw_text, title)
+    else:
+        # 默认模式：带时间戳
+        markdown = generate_markdown(segments, title)
 
     # 输出
     if args.output:
@@ -185,8 +194,9 @@ def main():
         output_path = audio_path.with_suffix(".md")
 
     output_path.write_text(markdown, encoding="utf-8")
-    print(f"\n✅ 逐字稿已生成: {output_path}")
-    print(f"   共 {len(segments)} 个段落")
+    print(f"\n转写完成: {output_path}")
+    print(f"   模式: {'语义分段' if args.smart_segment else '时间戳'}")
+    print(f"   共 {len(segments)} 个 Whisper 段落")
 
 
 if __name__ == "__main__":
