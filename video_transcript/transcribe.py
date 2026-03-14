@@ -1,14 +1,20 @@
 """
-音频转写 + Markdown 生成脚本（快速验证版）
+音频转写 + Markdown 生成脚本
 
-使用 faster-whisper 对录制的音频进行语音识别，生成带时间戳的 Markdown 逐字稿。
+使用 faster-whisper 对录制的音频进行语音识别，生成逐字稿。
+
+模式:
+  默认模式：带时间戳的逐行输出
+  --smart-segment：Whisper 出原始文本，Haiku API 做语义分段（推荐用于课程转录）
 
 用法:
-    python transcribe.py --input output/recording_xxx.webm
-    python transcribe.py --input output/recording_xxx.wav --model large-v3
+    python transcribe.py --input output/01_精神分析概要.ogg
+    python transcribe.py --input output/01_精神分析概要.ogg --smart-segment
+    python transcribe.py --input output/01_精神分析概要.ogg --model large-v3
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -58,7 +64,7 @@ def transcribe_audio(audio_path: Path, model_size: str = "large-v3") -> list[dic
 
 
 def generate_markdown(segments: list[dict], title: str = "课程转写") -> str:
-    """将转写结果生成 Markdown 格式"""
+    """将转写结果生成带时间戳的 Markdown 格式"""
     lines = [
         f"# {title}",
         "",
@@ -77,6 +83,73 @@ def generate_markdown(segments: list[dict], title: str = "课程转写") -> str:
         lines.append(f"{ts} {seg['text']}")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def segments_to_plain_text(segments: list[dict]) -> str:
+    """将 Whisper 段落合并为纯文本（去掉时间戳）"""
+    return "".join(seg["text"] for seg in segments)
+
+
+def smart_segment(raw_text: str, title: str) -> str:
+    """
+    用 Claude Haiku 将转录文本按语义自然分段。
+
+    输入：Whisper 输出的连续文本
+    输出：分段后的 Markdown 文本
+    """
+    import anthropic
+
+    client = anthropic.Anthropic()
+
+    # 对长文本分块处理（Haiku 上下文限制）
+    # 每块约 8000 字（中文），留足空间给 prompt 和输出
+    chunk_size = 8000
+    chunks = []
+    for i in range(0, len(raw_text), chunk_size):
+        chunks.append(raw_text[i:i + chunk_size])
+
+    all_paragraphs = []
+
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            print(f"  语义分段: 处理第 {i + 1}/{len(chunks)} 块...")
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{
+                "role": "user",
+                "content": f"""请将以下课程转录文本按语义自然分段。
+
+要求：
+1. 按内容主题和讲述逻辑自然分段
+2. 每段之间空一行
+3. 保留原文，不要修改、总结或删减任何内容
+4. 修正明显的语音识别错误（如同音字错误）
+5. 添加必要的标点符号
+6. 不要添加标题、编号或任何额外标注
+
+课程名称：{title}
+
+转录文本：
+{chunk}"""
+            }]
+        )
+
+        all_paragraphs.append(response.content[0].text)
+
+    # 组合所有分块结果
+    segmented_text = "\n\n".join(all_paragraphs)
+
+    # 生成最终 Markdown
+    lines = [
+        f"# {title}",
+        "",
+        "---",
+        "",
+        segmented_text,
+    ]
     return "\n".join(lines)
 
 
