@@ -6,6 +6,8 @@
 支持处理 PPT 动画呈现过程，只保留内容最完整的帧。
 """
 
+from __future__ import annotations
+
 import dataclasses
 from pathlib import Path
 from typing import Callable, Generator

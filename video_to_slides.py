@@ -9,6 +9,8 @@ Video to Slides — 从录播课程视频中提取 PPT 幻灯片并保存为 PDF
 4. 导出为 PDF 文件（一个视频一个 PDF）
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
