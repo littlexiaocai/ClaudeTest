@@ -132,51 +132,21 @@ def compute_similarity(
     return float(score)
 
 
-def _find_watermark_template(
-    frames: list[np.ndarray],
+def load_watermark_template(
+    source_path: str | Path,
     w_ratio: float = 0.25,
     h_ratio: float = 0.12,
     subtitle_h: float = 0.08,
-    match_threshold: float = 0.80,
-) -> np.ndarray | None:
+) -> np.ndarray:
     """
-    从多个帧中自动发现水印模板。
+    从一张 PPT 截图中提取水印模板。
 
-    思路：提取每帧的水印区域（右侧，字幕上方），两两比较相似度。
-    出现次数最多的相似图案就是水印。讲师画面该区域每帧都不同，
-    而 PPT 的水印区域每帧都一样。
+    传入一张包含水印的 PPT 图片路径，自动裁剪出水印区域作为模板。
     """
-    if len(frames) < 2:
-        return None
-
-    corners: list[np.ndarray] = []
-    for frame in frames:
-        corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
-        corners.append(corner)
-
-    # 统计每个角落区域和多少其他角落相似
-    match_counts: list[int] = [0] * len(corners)
-    target_h = corners[0].shape[0]
-    target_w = corners[0].shape[1]
-
-    for i in range(len(corners)):
-        for j in range(i + 1, len(corners)):
-            # 统一尺寸
-            a = cv2.cvtColor(cv2.resize(corners[i], (target_w, target_h)), cv2.COLOR_BGR2GRAY)
-            b = cv2.cvtColor(cv2.resize(corners[j], (target_w, target_h)), cv2.COLOR_BGR2GRAY)
-            sim = ssim(a, b)
-            if sim >= match_threshold:
-                match_counts[i] += 1
-                match_counts[j] += 1
-
-    # 找到匹配次数最多的角落 → 这就是水印模板
-    best_idx = max(range(len(match_counts)), key=lambda x: match_counts[x])
-
-    # 至少要和 2 个其他帧匹配，才认为是有效水印
-    if match_counts[best_idx] < 2:
-        return None
-
-    return corners[best_idx]
+    img = cv2.imread(str(source_path))
+    if img is None:
+        raise ValueError(f"无法读取水印参考图片: {source_path}")
+    return _extract_watermark_region(img, w_ratio, h_ratio, subtitle_h)
 
 
 def _has_watermark(
@@ -204,14 +174,14 @@ def detect_slides(
     video_path: str | Path,
     config: DetectionConfig | None = None,
     progress_callback: Callable | None = None,
+    watermark_template: np.ndarray | None = None,
 ) -> list[SlideSegment]:
     """
     检测视频中的所有幻灯片。
 
-    三步过滤：
+    过滤策略：
     1. 找到画面稳定的时段
-    2. 自动发现水印模板（PPT 右下角的固定标志）
-    3. 只保留包含水印的帧
+    2. 如果提供了水印模板，只保留包含水印的帧
     """
     if config is None:
         config = DetectionConfig()
@@ -264,16 +234,7 @@ def detect_slides(
         candidate_frames.append(frames_data[best_idx][2])
         candidate_info.append((seg_start, seg_end, best_idx))
 
-    # 第五步：自动发现水印模板
-    watermark_template = _find_watermark_template(
-        candidate_frames,
-        config.watermark_detect_w,
-        config.watermark_detect_h,
-        config.subtitle_h,
-        config.watermark_match_threshold,
-    )
-
-    # 第六步：用水印过滤
+    # 第五步：用水印过滤
     slides: list[SlideSegment] = []
     for idx, (seg_start, seg_end, best_idx) in enumerate(candidate_info):
         frame_idx, timestamp, frame = frames_data[best_idx]

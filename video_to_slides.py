@@ -25,6 +25,7 @@ from slide_detector import (
     deduplicate_slides,
     detect_slides,
     get_video_info,
+    load_watermark_template,
 )
 
 
@@ -96,6 +97,7 @@ def process_video(
     quality: int = 90,
     preview: bool = False,
     debug: bool = False,
+    watermark_source: str | None = None,
 ) -> str:
     """
     处理单个视频：检测幻灯片 -> 去重 -> 保存 PDF。
@@ -120,9 +122,16 @@ def process_video(
           f"时长: {duration_str}")
     print()
 
+    # 加载水印模板（如果提供）
+    watermark_tmpl = None
+    if watermark_source:
+        print(f"🔖 加载水印模板: {watermark_source}")
+        watermark_tmpl = load_watermark_template(watermark_source)
+
     # 检测幻灯片
     print("🔍 正在检测幻灯片...")
-    slides = detect_slides(video_path, config, progress_callback=_print_progress)
+    slides = detect_slides(video_path, config, progress_callback=_print_progress,
+                           watermark_template=watermark_tmpl)
     print()  # 换行（进度条后）
     print(f"   检测到 {len(slides)} 张幻灯片")
 
@@ -217,6 +226,10 @@ def main():
         help="最少连续稳定帧数（默认: 3，过滤短暂静止）",
     )
     parser.add_argument(
+        "--watermark", "-w",
+        help="包含水印的 PPT 截图路径（用于过滤非 PPT 画面）",
+    )
+    parser.add_argument(
         "--dedup",
         action="store_true",
         help="启用幻灯片去重（默认不去重）",
@@ -270,6 +283,7 @@ def main():
             quality=args.quality,
             preview=args.preview,
             debug=args.debug,
+            watermark_source=args.watermark,
         )
 
 
