@@ -38,10 +38,11 @@ class DetectionConfig:
     dedup_threshold: float = 0.98
     crop_watermark: bool = True
     watermark_region: tuple[float, float] = (0.15, 0.08)
-    # 水印检测区域（右下角的比例）
-    watermark_detect_w: float = 0.20   # 右下角宽度占比
-    watermark_detect_h: float = 0.10   # 右下角高度占比
-    watermark_match_threshold: float = 0.85  # 水印匹配阈值
+    # 水印检测区域（跳过底部字幕条，检测字幕上方的右侧区域）
+    subtitle_h: float = 0.08            # 底部字幕条高度占比（跳过）
+    watermark_detect_w: float = 0.25    # 水印区域宽度占比（右侧）
+    watermark_detect_h: float = 0.12    # 水印区域高度占比（字幕上方）
+    watermark_match_threshold: float = 0.80  # 水印匹配阈值
 
 
 def get_video_info(video_path: str | Path) -> dict:
@@ -99,14 +100,16 @@ def _crop_for_comparison(
 
 def _extract_watermark_region(
     frame: np.ndarray,
-    w_ratio: float = 0.20,
-    h_ratio: float = 0.10,
+    w_ratio: float = 0.25,
+    h_ratio: float = 0.12,
+    subtitle_h: float = 0.08,
 ) -> np.ndarray:
-    """提取右下角水印区域"""
+    """提取水印区域（右侧，字幕条上方）"""
     h, w = frame.shape[:2]
     x_start = int(w * (1 - w_ratio))
-    y_start = int(h * (1 - h_ratio))
-    return frame[y_start:, x_start:]
+    y_end = int(h * (1 - subtitle_h))      # 跳过底部字幕
+    y_start = int(h * (1 - subtitle_h - h_ratio))
+    return frame[y_start:y_end, x_start:]
 
 
 def compute_similarity(
@@ -131,24 +134,24 @@ def compute_similarity(
 
 def _find_watermark_template(
     frames: list[np.ndarray],
-    w_ratio: float = 0.20,
-    h_ratio: float = 0.10,
-    match_threshold: float = 0.85,
+    w_ratio: float = 0.25,
+    h_ratio: float = 0.12,
+    subtitle_h: float = 0.08,
+    match_threshold: float = 0.80,
 ) -> np.ndarray | None:
     """
     从多个帧中自动发现水印模板。
 
-    思路：提取每帧的右下角区域，两两比较相似度。
-    出现次数最多的相似图案就是水印。讲师画面的右下角每帧都不同，
-    而 PPT 的右下角水印每帧都一样。
+    思路：提取每帧的水印区域（右侧，字幕上方），两两比较相似度。
+    出现次数最多的相似图案就是水印。讲师画面该区域每帧都不同，
+    而 PPT 的水印区域每帧都一样。
     """
     if len(frames) < 2:
         return None
 
-    # 提取所有帧的右下角区域
     corners: list[np.ndarray] = []
     for frame in frames:
-        corner = _extract_watermark_region(frame, w_ratio, h_ratio)
+        corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
         corners.append(corner)
 
     # 统计每个角落区域和多少其他角落相似
@@ -179,12 +182,13 @@ def _find_watermark_template(
 def _has_watermark(
     frame: np.ndarray,
     template: np.ndarray,
-    w_ratio: float = 0.20,
-    h_ratio: float = 0.10,
-    threshold: float = 0.85,
+    w_ratio: float = 0.25,
+    h_ratio: float = 0.12,
+    subtitle_h: float = 0.08,
+    threshold: float = 0.80,
 ) -> bool:
-    """检测帧的右下角是否包含水印"""
-    corner = _extract_watermark_region(frame, w_ratio, h_ratio)
+    """检测帧的水印区域是否包含水印"""
+    corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
 
     target_h = template.shape[0]
     target_w = template.shape[1]
@@ -265,6 +269,7 @@ def detect_slides(
         candidate_frames,
         config.watermark_detect_w,
         config.watermark_detect_h,
+        config.subtitle_h,
         config.watermark_match_threshold,
     )
 
@@ -279,6 +284,7 @@ def detect_slides(
                 frame, watermark_template,
                 config.watermark_detect_w,
                 config.watermark_detect_h,
+                config.subtitle_h,
                 config.watermark_match_threshold,
             ):
                 continue
