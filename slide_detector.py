@@ -31,8 +31,8 @@ class SlideSegment:
 class DetectionConfig:
     """幻灯片检测参数配置"""
     sample_fps: float = 2.0                  # 采样帧率
-    stability_threshold: float = 0.95        # 连续帧 SSIM 高于此值视为稳定
-    min_stable_frames: int = 3               # 最少连续稳定帧数才算一个稳定段
+    stability_threshold: float = 0.99        # 连续帧 SSIM 高于此值视为稳定（PPT 完全静止）
+    min_stable_frames: int = 5               # 最少连续稳定帧数才算一个稳定段（2fps下=2.5秒）
     dedup_threshold: float = 0.98            # 去重：两张幻灯片 SSIM 高于此值视为重复
     crop_watermark: bool = True              # 裁剪右下角水印区域后再比较
     watermark_region: tuple[float, float] = (0.15, 0.08)  # 水印区域占比 (宽%, 高%)
