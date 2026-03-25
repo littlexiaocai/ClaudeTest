@@ -143,7 +143,7 @@ def process_video(
     print("📋 幻灯片列表:")
     for i, slide in enumerate(slides):
         time_str = _format_time(slide.timestamp_sec)
-        print(f"   [{i + 1:3d}] {time_str}  (平坦度: {slide.flatness:.2f})")
+        print(f"   [{i + 1:3d}] {time_str}")
 
     # 调试模式：保存每张幻灯片为单独图片
     if debug:
@@ -217,12 +217,6 @@ def main():
         help="最少连续稳定帧数（默认: 3，过滤短暂静止）",
     )
     parser.add_argument(
-        "--flatness-threshold",
-        type=float,
-        default=0.35,
-        help="PPT 平坦度阈值（默认: 0.35，越高越严格，过滤更多非PPT画面）",
-    )
-    parser.add_argument(
         "--dedup",
         action="store_true",
         help="启用幻灯片去重（默认不去重）",
@@ -251,7 +245,6 @@ def main():
         sample_fps=args.fps,
         stability_threshold=args.stability_threshold,
         min_stable_frames=args.min_stable_frames,
-        flatness_threshold=args.flatness_threshold,
     )
 
     # 处理每个视频

@@ -4,8 +4,8 @@
 
 双重过滤策略：
 1. 时间稳定性：找到画面连续不变的时段（PPT 展示中）
-2. 内容特征：PPT 有大面积平坦背景，讲师画面有丰富纹理
-两个条件同时满足才认定为 PPT 幻灯片。
+2. 水印检测：PPT 右下角有固定水印（如"简单心理 Uni"），
+   自动识别水印图案，只保留带水印的帧
 """
 
 from __future__ import annotations
@@ -22,24 +22,26 @@ from skimage.metrics import structural_similarity as ssim
 @dataclasses.dataclass
 class SlideSegment:
     """表示视频中的一个幻灯片段"""
-    start_frame_idx: int       # 稳定段起始帧索引
-    end_frame_idx: int         # 稳定段结束帧索引
-    best_frame_idx: int        # 选取的帧索引
-    best_frame: np.ndarray     # 帧图像数据
-    timestamp_sec: float       # 帧在视频中的时间（秒）
-    flatness: float = 0.0      # 平坦度分数（调试用）
+    start_frame_idx: int
+    end_frame_idx: int
+    best_frame_idx: int
+    best_frame: np.ndarray
+    timestamp_sec: float
 
 
 @dataclasses.dataclass
 class DetectionConfig:
     """幻灯片检测参数配置"""
-    sample_fps: float = 2.0                  # 采样帧率
-    stability_threshold: float = 0.97        # 连续帧 SSIM 高于此值视为稳定
-    min_stable_frames: int = 3               # 最少连续稳定帧数才算一个稳定段
-    flatness_threshold: float = 0.35         # 平坦度高于此值才算 PPT（过滤讲师画面）
-    dedup_threshold: float = 0.98            # 去重阈值
-    crop_watermark: bool = True              # 裁剪右下角水印区域后再比较
+    sample_fps: float = 2.0
+    stability_threshold: float = 0.97
+    min_stable_frames: int = 3
+    dedup_threshold: float = 0.98
+    crop_watermark: bool = True
     watermark_region: tuple[float, float] = (0.15, 0.08)
+    # 水印检测区域（右下角的比例）
+    watermark_detect_w: float = 0.20   # 右下角宽度占比
+    watermark_detect_h: float = 0.10   # 右下角高度占比
+    watermark_match_threshold: float = 0.85  # 水印匹配阈值
 
 
 def get_video_info(video_path: str | Path) -> dict:
@@ -95,6 +97,18 @@ def _crop_for_comparison(
     return frame[:crop_h, :crop_w]
 
 
+def _extract_watermark_region(
+    frame: np.ndarray,
+    w_ratio: float = 0.20,
+    h_ratio: float = 0.10,
+) -> np.ndarray:
+    """提取右下角水印区域"""
+    h, w = frame.shape[:2]
+    x_start = int(w * (1 - w_ratio))
+    y_start = int(h * (1 - h_ratio))
+    return frame[y_start:, x_start:]
+
+
 def compute_similarity(
     frame_a: np.ndarray,
     frame_b: np.ndarray,
@@ -115,32 +129,71 @@ def compute_similarity(
     return float(score)
 
 
-def compute_flatness(frame: np.ndarray) -> float:
+def _find_watermark_template(
+    frames: list[np.ndarray],
+    w_ratio: float = 0.20,
+    h_ratio: float = 0.10,
+    match_threshold: float = 0.85,
+) -> np.ndarray | None:
     """
-    计算图像的平坦度（0.0-1.0）。
+    从多个帧中自动发现水印模板。
 
-    将图像分成小块，统计"平坦"块（边缘活动低）的比例。
-    PPT 幻灯片有大面积纯色背景 → 平坦度高（>0.4）
-    讲师画面有丰富纹理（人脸、家具、背景）→ 平坦度低（<0.3）
+    思路：提取每帧的右下角区域，两两比较相似度。
+    出现次数最多的相似图案就是水印。讲师画面的右下角每帧都不同，
+    而 PPT 的右下角水印每帧都一样。
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # Laplacian 检测边缘
-    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    if len(frames) < 2:
+        return None
 
-    block_size = 32
-    h, w = gray.shape
-    flat_blocks = 0
-    total_blocks = 0
+    # 提取所有帧的右下角区域
+    corners: list[np.ndarray] = []
+    for frame in frames:
+        corner = _extract_watermark_region(frame, w_ratio, h_ratio)
+        corners.append(corner)
 
-    for y in range(0, h - block_size + 1, block_size):
-        for x in range(0, w - block_size + 1, block_size):
-            block = laplacian[y:y + block_size, x:x + block_size]
-            total_blocks += 1
-            # 标准差低 = 该区域平坦（纯色背景）
-            if np.std(block) < 5.0:
-                flat_blocks += 1
+    # 统计每个角落区域和多少其他角落相似
+    match_counts: list[int] = [0] * len(corners)
+    target_h = corners[0].shape[0]
+    target_w = corners[0].shape[1]
 
-    return flat_blocks / total_blocks if total_blocks > 0 else 0.0
+    for i in range(len(corners)):
+        for j in range(i + 1, len(corners)):
+            # 统一尺寸
+            a = cv2.cvtColor(cv2.resize(corners[i], (target_w, target_h)), cv2.COLOR_BGR2GRAY)
+            b = cv2.cvtColor(cv2.resize(corners[j], (target_w, target_h)), cv2.COLOR_BGR2GRAY)
+            sim = ssim(a, b)
+            if sim >= match_threshold:
+                match_counts[i] += 1
+                match_counts[j] += 1
+
+    # 找到匹配次数最多的角落 → 这就是水印模板
+    best_idx = max(range(len(match_counts)), key=lambda x: match_counts[x])
+
+    # 至少要和 2 个其他帧匹配，才认为是有效水印
+    if match_counts[best_idx] < 2:
+        return None
+
+    return corners[best_idx]
+
+
+def _has_watermark(
+    frame: np.ndarray,
+    template: np.ndarray,
+    w_ratio: float = 0.20,
+    h_ratio: float = 0.10,
+    threshold: float = 0.85,
+) -> bool:
+    """检测帧的右下角是否包含水印"""
+    corner = _extract_watermark_region(frame, w_ratio, h_ratio)
+
+    target_h = template.shape[0]
+    target_w = template.shape[1]
+
+    a = cv2.cvtColor(cv2.resize(corner, (target_w, target_h)), cv2.COLOR_BGR2GRAY)
+    b = cv2.cvtColor(cv2.resize(template, (target_w, target_h)), cv2.COLOR_BGR2GRAY)
+
+    sim = ssim(a, b)
+    return sim >= threshold
 
 
 def detect_slides(
@@ -151,9 +204,10 @@ def detect_slides(
     """
     检测视频中的所有幻灯片。
 
-    双重过滤：
-    1. 找到画面稳定的时段（连续帧 SSIM 高）
-    2. 用平坦度过滤掉讲师画面（PPT 有大面积背景，讲师画面有纹理）
+    三步过滤：
+    1. 找到画面稳定的时段
+    2. 自动发现水印模板（PPT 右下角的固定标志）
+    3. 只保留包含水印的帧
     """
     if config is None:
         config = DetectionConfig()
@@ -195,16 +249,39 @@ def detect_slides(
         else:
             i += 1
 
-    # 第四步：对每个稳定段，用平坦度过滤讲师画面
-    slides: list[SlideSegment] = []
+    if not stable_segments:
+        return []
+
+    # 第四步：收集所有稳定段的候选帧
+    candidate_frames = []
+    candidate_info = []  # (seg_start, seg_end, best_idx)
     for seg_start, seg_end in stable_segments:
         best_idx = seg_end
+        candidate_frames.append(frames_data[best_idx][2])
+        candidate_info.append((seg_start, seg_end, best_idx))
+
+    # 第五步：自动发现水印模板
+    watermark_template = _find_watermark_template(
+        candidate_frames,
+        config.watermark_detect_w,
+        config.watermark_detect_h,
+        config.watermark_match_threshold,
+    )
+
+    # 第六步：用水印过滤
+    slides: list[SlideSegment] = []
+    for idx, (seg_start, seg_end, best_idx) in enumerate(candidate_info):
         frame_idx, timestamp, frame = frames_data[best_idx]
 
-        flatness = compute_flatness(frame)
-        if flatness < config.flatness_threshold:
-            # 平坦度低 = 讲师画面，跳过
-            continue
+        # 如果找到了水印模板，只保留有水印的帧
+        if watermark_template is not None:
+            if not _has_watermark(
+                frame, watermark_template,
+                config.watermark_detect_w,
+                config.watermark_detect_h,
+                config.watermark_match_threshold,
+            ):
+                continue
 
         slides.append(SlideSegment(
             start_frame_idx=frames_data[seg_start][0],
@@ -212,7 +289,6 @@ def detect_slides(
             best_frame_idx=frame_idx,
             best_frame=frame.copy(),
             timestamp_sec=timestamp,
-            flatness=flatness,
         ))
 
     return slides
