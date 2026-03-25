@@ -127,7 +127,7 @@ def process_video(
     print(f"   检测到 {len(slides)} 张幻灯片")
 
     if not slides:
-        print("⚠️  未检测到任何幻灯片，请尝试调整 --transition-threshold 参数")
+        print("⚠️  未检测到任何幻灯片，请尝试调整 --stability-threshold 参数")
         sys.exit(1)
 
     # 去重
@@ -185,7 +185,7 @@ def main():
   python video_to_slides.py lecture.mp4 --preview          # 预览后再生成
   python video_to_slides.py lecture.mp4 --debug            # 调试模式
   python video_to_slides.py lecture.mp4 --fps 1            # 降低采样率加速
-  python video_to_slides.py lecture.mp4 --transition-threshold 0.60  # 调整灵敏度
+  python video_to_slides.py lecture.mp4 --stability-threshold 0.90  # 降低稳定判定阈值
         """,
     )
 
@@ -205,21 +205,21 @@ def main():
         help="采样帧率（默认: 2.0，越高越精确但越慢）",
     )
     parser.add_argument(
-        "--transition-threshold",
+        "--stability-threshold",
         type=float,
-        default=0.70,
-        help="幻灯片切换检测阈值（默认: 0.70，越低越严格）",
+        default=0.95,
+        help="画面稳定判定阈值（默认: 0.95，越高越严格）",
     )
     parser.add_argument(
-        "--min-duration",
-        type=float,
-        default=2.0,
-        help="最短幻灯片持续时间/秒（默认: 2.0，过滤误检）",
+        "--min-stable-frames",
+        type=int,
+        default=3,
+        help="最少连续稳定帧数（默认: 3，过滤短暂静止）",
     )
     parser.add_argument(
-        "--no-dedup",
+        "--dedup",
         action="store_true",
-        help="不进行幻灯片去重",
+        help="启用幻灯片去重（默认不去重）",
     )
     parser.add_argument(
         "--quality",
@@ -243,8 +243,8 @@ def main():
     # 构建检测配置
     config = DetectionConfig(
         sample_fps=args.fps,
-        transition_threshold=args.transition_threshold,
-        min_slide_duration_sec=args.min_duration,
+        stability_threshold=args.stability_threshold,
+        min_stable_frames=args.min_stable_frames,
     )
 
     # 处理每个视频
@@ -266,7 +266,7 @@ def main():
             video_path=video_path,
             output_path=output,
             config=config,
-            deduplicate=not args.no_dedup,
+            deduplicate=args.dedup,
             quality=args.quality,
             preview=args.preview,
             debug=args.debug,
