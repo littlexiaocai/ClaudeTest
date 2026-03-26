@@ -43,6 +43,7 @@ from slide_detector import (
     deduplicate_slides,
     detect_slides,
     filter_low_content_slides,
+    filter_natural_scenes,
     get_video_info,
     load_watermark_template,
 )
@@ -579,6 +580,13 @@ def generate_notes(
         removed = original_count - len(slides)
         if removed > 0:
             print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
+
+    # 过滤自然场景（讲师摄像头画面）
+    before_scene = len(slides)
+    slides = filter_natural_scenes(slides)
+    scene_removed = before_scene - len(slides)
+    if scene_removed > 0:
+        print(f"   过滤: 移除 {scene_removed} 张摄像头画面，剩余 {len(slides)} 张")
 
     # 过滤低内容页（品牌片头/片尾）
     before_filter = len(slides)

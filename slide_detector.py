@@ -359,3 +359,59 @@ def filter_low_content_slides(
             print(f"   跳过低内容页 [{m:02d}:{s:02d}]（边缘密度 {edge_ratio:.3f} < {edge_ratio_threshold}）")
 
     return result
+
+
+def _compute_background_ratio(frame: np.ndarray, tolerance: int = 30) -> float:
+    """
+    计算帧中"背景区域"占比。
+
+    PPT 幻灯片有大面积均匀背景（白色/浅色/纯色），占比通常 > 40%。
+    摄像头画面（人物+书架+灯光）几乎没有大面积均匀区域，占比通常 < 20%。
+
+    方法：统计与帧中最常见颜色相近（±tolerance）的像素占比。
+    """
+    # 缩小以加速计算
+    small = cv2.resize(frame, (160, 90))
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    # 用直方图找到最常见的灰度值（众数）
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+    dominant_value = int(np.argmax(hist))
+
+    # 计算在 ±tolerance 范围内的像素占比
+    mask = np.abs(gray.astype(int) - dominant_value) <= tolerance
+    ratio = float(np.count_nonzero(mask)) / mask.size
+    return ratio
+
+
+def filter_natural_scenes(
+    slides: list[SlideSegment],
+    bg_ratio_threshold: float = 0.25,
+) -> list[SlideSegment]:
+    """
+    过滤自然场景帧（讲师摄像头画面）。
+
+    PPT 幻灯片有大面积均匀背景色，背景占比通常 > 40%。
+    摄像头画面（人+书架+灯光）色彩复杂，背景占比通常 < 20%。
+
+    Args:
+        slides: 幻灯片列表
+        bg_ratio_threshold: 背景占比阈值，低于此值视为自然场景（非 PPT）
+
+    Returns:
+        过滤后的幻灯片列表
+    """
+    if not slides:
+        return slides
+
+    result: list[SlideSegment] = []
+    for slide in slides:
+        bg_ratio = _compute_background_ratio(slide.best_frame)
+        if bg_ratio >= bg_ratio_threshold:
+            result.append(slide)
+        else:
+            timestamp = slide.timestamp_sec
+            m, s = int(timestamp // 60), int(timestamp % 60)
+            print(f"   跳过自然场景 [{m:02d}:{s:02d}]（背景占比 {bg_ratio:.1%} < {bg_ratio_threshold:.0%}）")
+
+    return result
