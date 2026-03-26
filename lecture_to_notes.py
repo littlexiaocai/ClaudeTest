@@ -483,30 +483,45 @@ def generate_notes(
     print(f"📹 视频: {video.name} ({duration_str})")
 
     # --- 逐字稿 ---
+    # 优先读取已有的 .txt 文件（已正确分段），其次读 SRT 重新合并，最后自动转录
+    transcript_text = ""
+    auto_txt = video.with_suffix(".txt")
+
     if srt_path:
+        # 用户指定了 SRT 文件
         srt = Path(srt_path)
         if not srt.exists():
             raise FileNotFoundError(f"找不到字幕文件: {srt_path}")
-        print(f"📝 读取字幕: {srt.name}")
-        srt_segments = parse_srt(srt_path)
-        print(f"   共 {len(srt_segments)} 个字幕片段")
-        paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+        # 尝试读取同目录的 .txt 文件
+        txt_for_srt = srt.with_suffix(".txt")
+        if txt_for_srt.exists():
+            print(f"📝 读取逐字稿: {txt_for_srt.name}")
+            transcript_text = txt_for_srt.read_text(encoding="utf-8")
+        else:
+            print(f"📝 读取字幕: {srt.name}（重新合并段落）")
+            srt_segments = parse_srt(srt_path)
+            paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+            transcript_text = "\n\n".join(p["text"] for p in paragraphs)
+    elif auto_txt.exists():
+        # 已有同名 .txt 文件，直接读取
+        print(f"📝 读取逐字稿: {auto_txt.name}")
+        transcript_text = auto_txt.read_text(encoding="utf-8")
     else:
-        # 检查是否已有同名 SRT 文件
+        # 自动转录
         auto_srt = video.with_suffix(".srt")
         if auto_srt.exists():
-            print(f"📝 发现已有字幕: {auto_srt.name}（跳过转录）")
+            print(f"📝 发现已有字幕: {auto_srt.name}（重新合并段落）")
             srt_segments = parse_srt(str(auto_srt))
-            print(f"   共 {len(srt_segments)} 个字幕片段")
             paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+            transcript_text = "\n\n".join(p["text"] for p in paragraphs)
         else:
             print("📝 未找到字幕文件，开始自动转录...")
-            whisper_segments = _transcribe_video(
-                video_path, whisper_model, whisper_language,
-            )
-            paragraphs = _segments_to_paragraphs(whisper_segments, pause_threshold)
+            _transcribe_video(video_path, whisper_model, whisper_language)
+            # 转录后会生成 .txt 文件，直接读取
+            transcript_text = auto_txt.read_text(encoding="utf-8")
 
-    print(f"   合并为 {len(paragraphs)} 个自然段落")
+    para_count = len([p for p in transcript_text.split("\n\n") if p.strip()])
+    print(f"   逐字稿 {len(transcript_text)} 字，{para_count} 个段落")
 
     # --- 幻灯片检测 ---
     watermark_tmpl = None
@@ -533,10 +548,6 @@ def generate_notes(
         removed = original_count - len(slides)
         if removed > 0:
             print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
-
-    # --- 合并逐字稿文本 ---
-    transcript_text = "\n\n".join(p["text"] for p in paragraphs)
-    print(f"   逐字稿共 {len(transcript_text)} 字，{len(paragraphs)} 个段落")
 
     # --- 保存幻灯片图片（备份） ---
     print("🖼️  保存幻灯片图片...")
