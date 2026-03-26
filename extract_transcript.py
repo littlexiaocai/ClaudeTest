@@ -65,7 +65,7 @@ def format_timestamp(seconds: float) -> str:
 
 def merge_to_paragraphs(
     segments: list,
-    pause_threshold: float = 0.8,
+    pause_threshold: float = 1.0,
 ) -> list[dict]:
     """
     根据语音停顿将 Whisper segments 合并为自然段落。
@@ -224,7 +224,7 @@ def main():
                         help="重新转录已存在的文件")
     parser.add_argument("--output-dir", "-o", default=None,
                         help="输出目录 (默认: 与视频同目录)")
-    parser.add_argument("--pause-threshold", "-p", type=float, default=0.8,
+    parser.add_argument("--pause-threshold", "-p", type=float, default=1.0,
                         help="段落分段的停顿阈值（秒，默认: 0.8）")
 
     args = parser.parse_args()
