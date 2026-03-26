@@ -42,6 +42,7 @@ from slide_detector import (
     SlideSegment,
     deduplicate_slides,
     detect_slides,
+    filter_low_content_slides,
     get_video_info,
     load_watermark_template,
 )
@@ -550,6 +551,17 @@ def generate_notes(
         removed = original_count - len(slides)
         if removed > 0:
             print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
+
+    # 过滤低内容页（品牌片头/片尾）
+    before_filter = len(slides)
+    slides = filter_low_content_slides(slides)
+    filtered = before_filter - len(slides)
+    if filtered > 0:
+        print(f"   过滤: 移除 {filtered} 张低内容页，剩余 {len(slides)} 张")
+
+    if not slides:
+        print("⚠️  过滤后无剩余幻灯片")
+        sys.exit(1)
 
     # --- 保存幻灯片图片（备份） ---
     print("🖼️  保存幻灯片图片...")

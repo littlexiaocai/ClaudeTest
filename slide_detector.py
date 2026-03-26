@@ -323,3 +323,39 @@ def deduplicate_slides(
                 break
 
     return [s for idx, s in enumerate(slides) if idx not in to_remove]
+
+
+def filter_low_content_slides(
+    slides: list[SlideSegment],
+    edge_ratio_threshold: float = 0.02,
+) -> list[SlideSegment]:
+    """
+    过滤低内容幻灯片（品牌片头/片尾页）。
+
+    通过 Canny 边缘检测计算内容密度：
+    - 有文字和图表的 PPT 通常边缘像素占比 > 3-5%
+    - 纯 logo + 空白背景的品牌页通常 < 1-2%
+
+    Args:
+        slides: 幻灯片列表
+        edge_ratio_threshold: 边缘像素占比阈值，低于此值视为低内容页
+
+    Returns:
+        过滤后的幻灯片列表
+    """
+    if not slides:
+        return slides
+
+    result: list[SlideSegment] = []
+    for slide in slides:
+        gray = cv2.cvtColor(slide.best_frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_ratio = float(np.count_nonzero(edges)) / edges.size
+        if edge_ratio >= edge_ratio_threshold:
+            result.append(slide)
+        else:
+            timestamp = slide.timestamp_sec
+            m, s = int(timestamp // 60), int(timestamp % 60)
+            print(f"   跳过低内容页 [{m:02d}:{s:02d}]（边缘密度 {edge_ratio:.3f} < {edge_ratio_threshold}）")
+
+    return result
