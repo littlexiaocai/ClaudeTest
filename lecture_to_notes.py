@@ -133,16 +133,16 @@ def _transcribe_video(
     language: str = "zh",
 ) -> list[dict]:
     """
-    使用 faster-whisper 转录视频，返回 segments 列表。
+    使用 mlx-whisper 转录视频，返回 segments 列表。
 
     每个 segment 包含 start, end, text 字段。
     同时在视频同目录保存 .srt 和 .txt 文件供后续使用。
     """
     try:
-        from faster_whisper import WhisperModel
+        import mlx_whisper
     except ImportError:
-        print("错误: 自动转录需要安装 faster-whisper")
-        print("  pip install faster-whisper")
+        print("错误: 自动转录需要安装 mlx-whisper")
+        print("  pip install mlx-whisper")
         sys.exit(1)
 
     import shutil
@@ -152,17 +152,16 @@ def _transcribe_video(
         sys.exit(1)
 
     from extract_transcript import (
+        MLX_MODEL_MAP,
         extract_audio,
         save_srt,
         save_txt,
     )
 
     video = Path(video_path)
+    model_repo = MLX_MODEL_MAP.get(model_name, model_name)
 
-    print(f"🎤 正在加载 faster-whisper 模型: {model_name} ...")
-    t0 = time.time()
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    print(f"   模型加载完成 ({time.time() - t0:.1f}秒)")
+    print(f"🎤 使用 mlx-whisper 模型: {model_repo}")
 
     # 提取音频到临时文件
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
@@ -173,23 +172,14 @@ def _transcribe_video(
         print("   提取音频...")
         extract_audio(video, tmp_audio)
 
-        print("   转录中...")
+        print("   转录中（Apple Silicon GPU 加速）...")
         t1 = time.time()
-        raw_segments, info = model.transcribe(
+        result = mlx_whisper.transcribe(
             str(tmp_audio),
+            path_or_hf_repo=model_repo,
             language=language,
-            beam_size=5,
-            vad_filter=True,
         )
-
-        # 转换为 dict 格式
-        segments = []
-        for seg in raw_segments:
-            segments.append({
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text,
-            })
+        segments = result.get("segments", [])
 
         elapsed = time.time() - t1
         text_len = sum(len(seg["text"].strip()) for seg in segments)

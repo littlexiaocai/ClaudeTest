@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """从课程视频中提取语音逐字稿。
 
-使用 faster-whisper（CTranslate2 优化引擎）将视频中的中文语音转录为文字。
-相比原版 Whisper 快 4-8 倍，精度相同。
+使用 mlx-whisper（Apple MLX 框架）将视频中的中文语音转录为文字。
+专为 Apple Silicon (M1/M2/M3/M4) 优化，利用 GPU 加速，速度远超 CPU 推理。
 输出两种格式：
   - .txt  按语句自然分段的纯文本（适合喂给大模型）
   - .srt  带时间戳的标准字幕文件（适合回溯定位）
@@ -18,11 +18,21 @@ import time
 from pathlib import Path
 
 try:
-    from faster_whisper import WhisperModel
+    import mlx_whisper
 except ImportError:
-    print("错误: 请安装 faster-whisper")
-    print("  pip install faster-whisper")
+    print("错误: 请安装 mlx-whisper")
+    print("  pip install mlx-whisper")
     sys.exit(1)
+
+
+# mlx-whisper 使用 HuggingFace 上的 MLX 格式模型
+MLX_MODEL_MAP = {
+    "tiny": "mlx-community/whisper-tiny",
+    "base": "mlx-community/whisper-base",
+    "small": "mlx-community/whisper-small",
+    "medium": "mlx-community/whisper-medium",
+    "large": "mlx-community/whisper-large-v3",
+}
 
 
 def check_prerequisites():
@@ -126,45 +136,12 @@ def save_srt(segments: list, output_path: Path):
     output_path.write_text("\n".join(srt_lines), encoding="utf-8")
 
 
-def _transcribe_with_faster_whisper(
-    audio_path: str,
-    model_name: str = "medium",
-    language: str = "zh",
-) -> list[dict]:
-    """
-    使用 faster-whisper 转录音频，返回与原版 Whisper 兼容的 segments 格式。
-
-    faster-whisper 基于 CTranslate2，CPU 上比原版快 4-8 倍，精度相同。
-    """
-    # auto 让 faster-whisper 自动选择最优计算设备
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    raw_segments, info = model.transcribe(
-        audio_path,
-        language=language,
-        beam_size=5,
-        vad_filter=True,  # 过滤无语音片段，进一步提速
-    )
-
-    # 转换为与原版 Whisper 兼容的 dict 格式
-    segments = []
-    for seg in raw_segments:
-        segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text,
-        })
-
-    return segments
-
-
 def process_videos(video_paths: list, model_name: str, language: str,
                    force: bool, output_dir=None, pause_threshold: float = 0.8):
     """批量处理视频文件。"""
-    print(f"正在加载 faster-whisper 模型: {model_name} ...")
-    t0 = time.time()
-    # 预加载模型（首次调用会下载）
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    print(f"模型加载完成 ({time.time() - t0:.1f}秒)\n")
+    model_repo = MLX_MODEL_MAP.get(model_name, model_name)
+    print(f"使用 mlx-whisper 模型: {model_repo}")
+    print(f"（首次运行会自动下载模型到 ~/.cache/huggingface/）\n")
 
     total = len(video_paths)
     done, skipped, failed = 0, 0, 0
@@ -193,23 +170,14 @@ def process_videos(video_paths: list, model_name: str, language: str,
             print(f"         提取音频...")
             extract_audio(video_path, tmp_audio)
 
-            # faster-whisper 转录
-            print(f"         转录中...")
-            raw_segments, info = model.transcribe(
+            # mlx-whisper 转录（API 兼容原版 Whisper）
+            print(f"         转录中（Apple Silicon GPU 加速）...")
+            result = mlx_whisper.transcribe(
                 str(tmp_audio),
+                path_or_hf_repo=model_repo,
                 language=language,
-                beam_size=5,
-                vad_filter=True,
             )
-
-            # 转换为 dict 格式
-            segments = []
-            for seg in raw_segments:
-                segments.append({
-                    "start": seg.start,
-                    "end": seg.end,
-                    "text": seg.text,
-                })
+            segments = result.get("segments", [])
 
             # 保存两种格式
             save_txt(segments, txt_path, pause_threshold)
@@ -236,7 +204,7 @@ def process_videos(video_paths: list, model_name: str, language: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="从课程视频中提取语音逐字稿 (使用 faster-whisper 加速引擎)",
+        description="从课程视频中提取语音逐字稿 (使用 mlx-whisper，Apple Silicon GPU 加速)",
         epilog="""示例:
   python extract_transcript.py ./videos/                    # 转录整个目录
   python extract_transcript.py ./videos/第01课.mp4           # 转录单个文件
