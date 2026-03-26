@@ -489,10 +489,6 @@ def generate_notes(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # 图片输出目录
-    img_dir = out_dir / f"{video.stem}_slides"
-    img_dir.mkdir(parents=True, exist_ok=True)
-
     # 获取视频信息
     info = get_video_info(video_path)
     duration_str = _format_time(info["duration_sec"])
@@ -599,12 +595,6 @@ def generate_notes(
         print("⚠️  过滤后无剩余幻灯片")
         sys.exit(1)
 
-    # --- 保存幻灯片图片（备份） ---
-    print("🖼️  保存幻灯片图片...")
-    for i, slide in enumerate(slides):
-        img_path = img_dir / f"slide_{i + 1:03d}.jpg"
-        cv2.imwrite(str(img_path), slide.best_frame)
-
     # --- 生成 PDF ---
     print("📄 生成 PDF...")
     generate_pdf(
@@ -616,9 +606,7 @@ def generate_notes(
     )
 
     print(f"\n✅ 完成! 共 {len(slides)} 张幻灯片")
-    print(f"   输出目录: {out_dir}")
-    print(f"   PDF:  {output}")
-    print(f"   图片: {img_dir}/")
+    print(f"   PDF: {output}")
 
     return str(output)
 

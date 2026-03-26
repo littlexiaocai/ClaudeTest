@@ -152,18 +152,15 @@ def batch_convert(
                 pause_threshold=pause_threshold,
             )
 
-            # 成功后，将文件移到正式位置
-            # PDF 放在输出根目录（方便判断是否完成）
-            # 其他文件放在子目录
+            # 成功后，只保留 PDF 到输出目录，清理中间文件
             tmp_pdf = tmp_out_dir / f"{video.stem}.pdf"
             final_pdf = out_dir / f"{video.stem}.pdf"
             if tmp_pdf.exists():
                 shutil.move(str(tmp_pdf), str(final_pdf))
 
-            # 子目录存放其余文件（逐字稿、图片等）
-            if video_out_dir.exists():
-                shutil.rmtree(video_out_dir)
-            shutil.move(str(tmp_out_dir), str(video_out_dir))
+            # 清理临时目录（中间文件：.txt, .srt, _slides/ 等）
+            if tmp_out_dir.exists():
+                shutil.rmtree(tmp_out_dir)
 
             done_count += 1
             remaining = total - done_count
