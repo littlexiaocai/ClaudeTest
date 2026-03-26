@@ -453,6 +453,7 @@ def generate_notes(
     whisper_model: str = "medium",
     whisper_language: str = "zh",
     pause_threshold: float = 1.0,
+    debug_watermark: bool = False,
 ) -> str:
     """
     从视频生成结构化 PDF 笔记（PPT 原图 + 逐字稿）。
@@ -534,6 +535,7 @@ def generate_notes(
         video_path, config,
         progress_callback=_print_progress,
         watermark_template=watermark_tmpl,
+        debug_watermark=debug_watermark,
     )
     print()
     print(f"   检测到 {len(slides)} 张幻灯片")
@@ -643,6 +645,11 @@ def main():
         default=3,
         help="最少连续稳定帧数（默认: 3）",
     )
+    parser.add_argument(
+        "--debug-watermark",
+        action="store_true",
+        help="输出水印检测调试信息（显示每帧的匹配分数）",
+    )
 
     args = parser.parse_args()
 
@@ -662,6 +669,7 @@ def main():
         whisper_model=args.model,
         whisper_language=args.language,
         pause_threshold=args.pause_threshold,
+        debug_watermark=args.debug_watermark,
     )
 
 

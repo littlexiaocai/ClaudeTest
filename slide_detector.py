@@ -156,18 +156,51 @@ def _has_watermark(
     h_ratio: float = 0.12,
     subtitle_h: float = 0.08,
     threshold: float = 0.80,
+    debug: bool = False,
 ) -> bool:
-    """检测帧的水印区域是否包含水印"""
+    """
+    检测帧的水印区域是否包含水印。
+
+    使用双重策略：
+    1. cv2.matchTemplate 模板匹配（对背景变化鲁棒）
+    2. SSIM 整体相似度（作为备选）
+    任一方法超过阈值即认为有水印。
+    """
     corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
 
-    target_h = template.shape[0]
-    target_w = template.shape[1]
+    corner_gray = cv2.cvtColor(corner, cv2.COLOR_BGR2GRAY)
+    tmpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
 
-    a = cv2.cvtColor(cv2.resize(corner, (target_w, target_h)), cv2.COLOR_BGR2GRAY)
-    b = cv2.cvtColor(cv2.resize(template, (target_w, target_h)), cv2.COLOR_BGR2GRAY)
+    # 策略1：模板匹配 — 将模板缩放到合适大小后在区域内搜索
+    # 确保模板不大于搜索区域
+    th, tw = tmpl_gray.shape[:2]
+    ch, cw = corner_gray.shape[:2]
 
-    sim = ssim(a, b)
-    return sim >= threshold
+    match_score = 0.0
+    if th <= ch and tw <= cw:
+        # 模板小于等于区域，直接匹配
+        result = cv2.matchTemplate(corner_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+        match_score = float(result.max())
+    else:
+        # 模板大于区域，缩放模板到区域大小的 80% 后匹配
+        scale = min(cw / tw, ch / th) * 0.8
+        new_tw = max(1, int(tw * scale))
+        new_th = max(1, int(th * scale))
+        tmpl_resized = cv2.resize(tmpl_gray, (new_tw, new_th))
+        if new_th <= ch and new_tw <= cw:
+            result = cv2.matchTemplate(corner_gray, tmpl_resized, cv2.TM_CCOEFF_NORMED)
+            match_score = float(result.max())
+
+    # 策略2：SSIM 整体比较（resize 到相同大小）
+    a = cv2.resize(corner_gray, (tw, th))
+    b = tmpl_gray
+    ssim_score = float(ssim(a, b))
+
+    if debug:
+        print(f"    [水印调试] matchTemplate={match_score:.3f}, SSIM={ssim_score:.3f}, 阈值={threshold}")
+
+    # 任一策略超过阈值即通过
+    return match_score >= threshold or ssim_score >= threshold
 
 
 def detect_slides(
@@ -175,6 +208,7 @@ def detect_slides(
     config: DetectionConfig | None = None,
     progress_callback: Callable | None = None,
     watermark_template: np.ndarray | None = None,
+    debug_watermark: bool = False,
 ) -> list[SlideSegment]:
     """
     检测视频中的所有幻灯片。
@@ -247,6 +281,7 @@ def detect_slides(
                 config.watermark_detect_h,
                 config.subtitle_h,
                 config.watermark_match_threshold,
+                debug=debug_watermark,
             ):
                 continue
 
