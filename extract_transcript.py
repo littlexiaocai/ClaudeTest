@@ -137,7 +137,7 @@ def _transcribe_with_faster_whisper(
     faster-whisper 基于 CTranslate2，CPU 上比原版快 4-8 倍，精度相同。
     """
     # auto 让 faster-whisper 自动选择最优计算设备
-    model = WhisperModel(model_name, device="auto", compute_type="auto")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
     raw_segments, info = model.transcribe(
         audio_path,
         language=language,
@@ -163,7 +163,7 @@ def process_videos(video_paths: list, model_name: str, language: str,
     print(f"正在加载 faster-whisper 模型: {model_name} ...")
     t0 = time.time()
     # 预加载模型（首次调用会下载）
-    model = WhisperModel(model_name, device="auto", compute_type="auto")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
     print(f"模型加载完成 ({time.time() - t0:.1f}秒)\n")
 
     total = len(video_paths)

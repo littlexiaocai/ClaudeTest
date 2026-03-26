@@ -161,7 +161,7 @@ def _transcribe_video(
 
     print(f"🎤 正在加载 faster-whisper 模型: {model_name} ...")
     t0 = time.time()
-    model = WhisperModel(model_name, device="auto", compute_type="auto")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
     print(f"   模型加载完成 ({time.time() - t0:.1f}秒)")
 
     # 提取音频到临时文件
