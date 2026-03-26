@@ -263,7 +263,7 @@ def detect_slides(
 
 def deduplicate_slides(
     slides: list[SlideSegment],
-    similarity_threshold: float = 0.98,
+    similarity_threshold: float = 0.90,
 ) -> list[SlideSegment]:
     """
     对检测到的幻灯片去重。
