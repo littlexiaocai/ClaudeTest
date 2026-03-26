@@ -132,12 +132,13 @@ def _transcribe_video(
     video_path: str | Path,
     model_name: str = "medium",
     language: str = "zh",
+    output_dir: Path | None = None,
 ) -> list[dict]:
     """
     使用 mlx-whisper 转录视频，返回 segments 列表。
 
     每个 segment 包含 start, end, text 字段。
-    同时在视频同目录保存 .srt 和 .txt 文件供后续使用。
+    保存 .srt 和 .txt 文件到 output_dir（默认视频同目录）。
     """
     try:
         import mlx_whisper
@@ -187,8 +188,9 @@ def _transcribe_video(
         print(f"   转录完成 ({elapsed:.1f}秒, {text_len}字)")
 
         # 保存 SRT 和 TXT 供后续使用
-        srt_path = video.with_suffix(".srt")
-        txt_path = video.with_suffix(".txt")
+        save_dir = output_dir if output_dir else video.parent
+        srt_path = save_dir / f"{video.stem}.srt"
+        txt_path = save_dir / f"{video.stem}.txt"
         save_srt(segments, srt_path)
         save_txt(segments, txt_path)
         print(f"   → {srt_path.name}")
@@ -447,6 +449,7 @@ def _print_progress(current: int, total: int) -> None:
 def generate_notes(
     video_path: str,
     srt_path: str | None = None,
+    output_dir: str | None = None,
     output_path: str | None = None,
     config: DetectionConfig | None = None,
     deduplicate: bool = True,
@@ -459,6 +462,7 @@ def generate_notes(
     """
     从视频生成结构化 PDF 笔记（PPT 原图 + 逐字稿）。
 
+    如果提供 output_dir，所有输出文件（PDF、逐字稿、PPT 图片）都保存到该目录。
     如果提供 srt_path 则读取已有字幕，否则自动调用 Whisper 转录。
 
     Returns:
@@ -468,15 +472,24 @@ def generate_notes(
     if not video.exists():
         raise FileNotFoundError(f"找不到视频文件: {video_path}")
 
+    # 确定输出目录
+    if output_dir:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    elif output_path:
+        out_dir = Path(output_path).parent
+    else:
+        out_dir = video.parent
+
     # 默认输出 PDF
     if output_path is None:
-        output_path = str(video.with_suffix(".pdf"))
+        output_path = str(out_dir / f"{video.stem}.pdf")
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # 图片输出目录（备份用）
-    img_dir = output.parent / f"{output.stem}_slides"
+    # 图片输出目录
+    img_dir = out_dir / f"{video.stem}_slides"
     img_dir.mkdir(parents=True, exist_ok=True)
 
     # 获取视频信息
@@ -486,8 +499,24 @@ def generate_notes(
 
     # --- 逐字稿 ---
     # 优先读取已有的 .txt 文件（已正确分段），其次读 SRT 重新合并，最后自动转录
+    # 搜索顺序：输出目录 → 视频同目录
     transcript_text = ""
+    out_txt = out_dir / f"{video.stem}.txt"
     auto_txt = video.with_suffix(".txt")
+
+    def _find_txt() -> Path | None:
+        """查找已有的 .txt 文件"""
+        for p in [out_txt, auto_txt]:
+            if p.exists():
+                return p
+        return None
+
+    def _find_srt() -> Path | None:
+        """查找已有的 .srt 文件"""
+        for p in [out_dir / f"{video.stem}.srt", video.with_suffix(".srt")]:
+            if p.exists():
+                return p
+        return None
 
     if srt_path:
         # 用户指定了 SRT 文件
@@ -504,23 +533,22 @@ def generate_notes(
             srt_segments = parse_srt(srt_path)
             paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
             transcript_text = "\n\n".join(p["text"] for p in paragraphs)
-    elif auto_txt.exists():
-        # 已有同名 .txt 文件，直接读取
-        print(f"📝 读取逐字稿: {auto_txt.name}")
-        transcript_text = auto_txt.read_text(encoding="utf-8")
     else:
-        # 自动转录
-        auto_srt = video.with_suffix(".srt")
-        if auto_srt.exists():
-            print(f"📝 发现已有字幕: {auto_srt.name}（重新合并段落）")
-            srt_segments = parse_srt(str(auto_srt))
-            paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
-            transcript_text = "\n\n".join(p["text"] for p in paragraphs)
+        existing_txt = _find_txt()
+        if existing_txt:
+            print(f"📝 读取逐字稿: {existing_txt}")
+            transcript_text = existing_txt.read_text(encoding="utf-8")
         else:
-            print("📝 未找到字幕文件，开始自动转录...")
-            _transcribe_video(video_path, whisper_model, whisper_language)
-            # 转录后会生成 .txt 文件，直接读取
-            transcript_text = auto_txt.read_text(encoding="utf-8")
+            existing_srt = _find_srt()
+            if existing_srt:
+                print(f"📝 发现已有字幕: {existing_srt}（重新合并段落）")
+                srt_segments = parse_srt(str(existing_srt))
+                paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+                transcript_text = "\n\n".join(p["text"] for p in paragraphs)
+            else:
+                print("📝 未找到字幕文件，开始自动转录...")
+                _transcribe_video(video_path, whisper_model, whisper_language, out_dir)
+                transcript_text = out_txt.read_text(encoding="utf-8")
 
     para_count = len([p for p in transcript_text.split("\n\n") if p.strip()])
     print(f"   逐字稿 {len(transcript_text)} 字，{para_count} 个段落")
@@ -580,6 +608,7 @@ def generate_notes(
     )
 
     print(f"\n✅ 完成! 共 {len(slides)} 张幻灯片")
+    print(f"   输出目录: {out_dir}")
     print(f"   PDF:  {output}")
     print(f"   图片: {img_dir}/")
 
@@ -598,9 +627,9 @@ def main():
         epilog="""\
 示例:
   python lecture_to_notes.py lecture.mp4 -w ppt.jpg --dedup           # 一步完成
+  python lecture_to_notes.py lecture.mp4 -w ppt.jpg -d ~/笔记/课程1   # 输出到指定目录
   python lecture_to_notes.py lecture.mp4 --srt lecture.srt --dedup     # 使用已有字幕
   python lecture_to_notes.py lecture.mp4 -w ppt.jpg --model large     # 用更大模型转录
-  python lecture_to_notes.py lecture.mp4 -w ppt.jpg -o 笔记.pdf       # 指定输出文件
         """,
     )
 
@@ -612,6 +641,10 @@ def main():
     parser.add_argument(
         "--output", "-o",
         help="输出 PDF 文件路径（默认: 与视频同名.pdf）",
+    )
+    parser.add_argument(
+        "--output-dir", "-d",
+        help="输出目录（PDF、逐字稿、PPT 图片全部保存到此目录）",
     )
     parser.add_argument(
         "--watermark", "-w",
@@ -683,6 +716,7 @@ def main():
     generate_notes(
         video_path=args.video,
         srt_path=args.srt,
+        output_dir=args.output_dir,
         output_path=args.output,
         config=config,
         deduplicate=args.dedup,
