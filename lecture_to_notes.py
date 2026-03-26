@@ -266,24 +266,32 @@ def match_transcript_to_slides(
     """
     将段落化的逐字稿按时间戳匹配到对应的幻灯片。
 
-    每张幻灯片对应的时间范围：从该幻灯片出现到下一张幻灯片出现。
+    每个段落只归属一张幻灯片（按段落开始时间判定）。
     段落之间用空行分隔。
     """
     if not slides:
         return []
 
-    results: list[tuple[SlideSegment, str]] = []
-
+    # 构建每张幻灯片的时间范围
+    slide_ranges: list[tuple[float, float]] = []
     for i, slide in enumerate(slides):
-        start_time = slide.timestamp_sec
-        end_time = slides[i + 1].timestamp_sec if i + 1 < len(slides) else float("inf")
+        start = slide.timestamp_sec
+        end = slides[i + 1].timestamp_sec if i + 1 < len(slides) else float("inf")
+        slide_ranges.append((start, end))
 
-        matched: list[str] = []
-        for para in paragraphs:
-            if para["end"] > start_time and para["start"] < end_time:
-                matched.append(para["text"])
+    # 每张幻灯片对应的文本列表
+    slide_texts: list[list[str]] = [[] for _ in slides]
 
-        results.append((slide, "\n\n".join(matched)))
+    # 每个段落按开始时间归属到唯一一张幻灯片
+    for para in paragraphs:
+        for i, (start, end) in enumerate(slide_ranges):
+            if start <= para["start"] < end:
+                slide_texts[i].append(para["text"])
+                break
+
+    results: list[tuple[SlideSegment, str]] = []
+    for slide, texts in zip(slides, slide_texts):
+        results.append((slide, "\n\n".join(texts)))
 
     return results
 
