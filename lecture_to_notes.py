@@ -202,7 +202,7 @@ def _transcribe_video(
 
 def _segments_to_paragraphs(
     segments: list[dict] | list[SrtSegment],
-    pause_threshold: float = 2.0,
+    pause_threshold: float = 0.8,
 ) -> list[dict]:
     """
     将逐字稿片段按停顿合并为自然段落。
@@ -444,7 +444,7 @@ def generate_notes(
     watermark_source: str | None = None,
     whisper_model: str = "medium",
     whisper_language: str = "zh",
-    pause_threshold: float = 2.0,
+    pause_threshold: float = 0.8,
 ) -> str:
     """
     从视频生成结构化 PDF 笔记（PPT 原图 + 逐字稿）。

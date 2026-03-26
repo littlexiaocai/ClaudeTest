@@ -54,7 +54,7 @@ def format_timestamp(seconds: float) -> str:
 
 def merge_to_paragraphs(
     segments: list,
-    pause_threshold: float = 2.0,
+    pause_threshold: float = 0.8,
 ) -> list[dict]:
     """
     根据语音停顿将 Whisper segments 合并为自然段落。
@@ -106,7 +106,7 @@ def merge_to_paragraphs(
     return paragraphs
 
 
-def save_txt(segments: list, output_path: Path, pause_threshold: float = 2.0):
+def save_txt(segments: list, output_path: Path, pause_threshold: float = 0.8):
     """保存为按段落自然分段的纯文本。"""
     paragraphs = merge_to_paragraphs(segments, pause_threshold)
     texts = [p["text"] for p in paragraphs]
@@ -126,7 +126,7 @@ def save_srt(segments: list, output_path: Path):
 
 
 def process_videos(video_paths: list, model_name: str, language: str,
-                   force: bool, output_dir=None, pause_threshold: float = 2.0):
+                   force: bool, output_dir=None, pause_threshold: float = 0.8):
     """批量处理视频文件。"""
     print(f"正在加载 Whisper 模型: {model_name} ...")
     t0 = time.time()
@@ -210,8 +210,8 @@ def main():
                         help="重新转录已存在的文件")
     parser.add_argument("--output-dir", "-o", default=None,
                         help="输出目录 (默认: 与视频同目录)")
-    parser.add_argument("--pause-threshold", "-p", type=float, default=2.0,
-                        help="段落分段的停顿阈值（秒，默认: 2.0）")
+    parser.add_argument("--pause-threshold", "-p", type=float, default=0.8,
+                        help="段落分段的停顿阈值（秒，默认: 0.8）")
 
     args = parser.parse_args()
 
