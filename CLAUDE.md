@@ -7,6 +7,9 @@
 - `photo_to_obsidian.py` — 照片提取工具（图片编码、Claude API 提取、Obsidian 保存、交互问答）
 - `video_to_slides.py` — 视频 PPT 提取工具（CLI 入口、PDF 生成）
 - `slide_detector.py` — 幻灯片检测模块（帧提取、相似度比较、切换检测、去重）
+- `extract_transcript.py` — 语音逐字稿提取（Whisper 本地模型，输出 .txt + .srt）
+- `record_psychology_videos.py` — 简单心理课程视频录制（Playwright + ffmpeg）
+- `lecture_to_notes.py` — PPT + 逐字稿合并笔记（按时间戳匹配，输出 Markdown + 图片）
 - `requirements.txt` — Python 依赖
 - `setup.sh` — 安装脚本
 
@@ -17,6 +20,8 @@
 - OpenCV（视频帧提取和图像比较）
 - scikit-image（SSIM 结构相似度）
 - Pillow（PDF 生成）
+- OpenAI Whisper（语音转录）
+- Playwright（浏览器自动化录制）
 - Markdown + YAML frontmatter (Obsidian 兼容)
 
 ## 开发规范
