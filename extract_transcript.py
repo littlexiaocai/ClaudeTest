@@ -52,10 +52,65 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def save_txt(segments: list, output_path: Path):
-    """保存为按语句分段的纯文本。"""
-    lines = [seg["text"].strip() for seg in segments if seg["text"].strip()]
-    output_path.write_text("\n\n".join(lines), encoding="utf-8")
+def merge_to_paragraphs(
+    segments: list,
+    pause_threshold: float = 2.0,
+) -> list[dict]:
+    """
+    根据语音停顿将 Whisper segments 合并为自然段落。
+
+    当相邻句子之间的停顿超过 pause_threshold 秒时，开始新段落。
+    内容完全不丢失，只是重新分组。
+
+    返回段落列表，每个段落包含:
+      - text: 合并后的文本
+      - start: 段落起始时间
+      - end: 段落结束时间
+    """
+    if not segments:
+        return []
+
+    paragraphs: list[dict] = []
+    current_texts: list[str] = []
+    current_start = segments[0]["start"]
+    current_end = segments[0]["end"]
+
+    for i, seg in enumerate(segments):
+        text = seg["text"].strip()
+        if not text:
+            continue
+
+        if i > 0 and seg["start"] - current_end >= pause_threshold:
+            # 停顿超过阈值，结束当前段落
+            if current_texts:
+                paragraphs.append({
+                    "text": "".join(current_texts),
+                    "start": current_start,
+                    "end": current_end,
+                })
+            current_texts = [text]
+            current_start = seg["start"]
+        else:
+            current_texts.append(text)
+
+        current_end = seg["end"]
+
+    # 最后一个段落
+    if current_texts:
+        paragraphs.append({
+            "text": "".join(current_texts),
+            "start": current_start,
+            "end": current_end,
+        })
+
+    return paragraphs
+
+
+def save_txt(segments: list, output_path: Path, pause_threshold: float = 2.0):
+    """保存为按段落自然分段的纯文本。"""
+    paragraphs = merge_to_paragraphs(segments, pause_threshold)
+    texts = [p["text"] for p in paragraphs]
+    output_path.write_text("\n\n".join(texts), encoding="utf-8")
 
 
 def save_srt(segments: list, output_path: Path):
@@ -71,7 +126,7 @@ def save_srt(segments: list, output_path: Path):
 
 
 def process_videos(video_paths: list, model_name: str, language: str,
-                   force: bool, output_dir=None):
+                   force: bool, output_dir=None, pause_threshold: float = 2.0):
     """批量处理视频文件。"""
     print(f"正在加载 Whisper 模型: {model_name} ...")
     t0 = time.time()
@@ -111,7 +166,7 @@ def process_videos(video_paths: list, model_name: str, language: str,
             segments = result.get("segments", [])
 
             # 保存两种格式
-            save_txt(segments, txt_path)
+            save_txt(segments, txt_path, pause_threshold)
             save_srt(segments, srt_path)
 
             elapsed = time.time() - t1
@@ -155,6 +210,8 @@ def main():
                         help="重新转录已存在的文件")
     parser.add_argument("--output-dir", "-o", default=None,
                         help="输出目录 (默认: 与视频同目录)")
+    parser.add_argument("--pause-threshold", "-p", type=float, default=2.0,
+                        help="段落分段的停顿阈值（秒，默认: 2.0）")
 
     args = parser.parse_args()
 
@@ -178,7 +235,8 @@ def main():
         output_dir = Path(os.path.expanduser(args.output_dir)).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    process_videos(video_paths, args.model, args.language, args.force, output_dir)
+    process_videos(video_paths, args.model, args.language, args.force, output_dir,
+                   args.pause_threshold)
 
 
 if __name__ == "__main__":

@@ -1,23 +1,41 @@
 #!/usr/bin/env python3
 """
-Lecture to Notes — 将视频课程的 PPT 幻灯片与逐字稿合并为结构化笔记
+Lecture to Notes — 将视频课程的 PPT 幻灯片与逐字稿合并为 PDF 笔记
 
-功能：
+一步完成：
 1. 从视频中提取 PPT 幻灯片（使用 slide_detector）
-2. 从 SRT 字幕文件中读取逐字稿（需先用 extract_transcript.py 生成）
+2. 从视频中转录语音逐字稿（使用 Whisper，或读取已有 SRT 文件）
 3. 按时间戳匹配：每张 PPT 后面附上对应时段的讲解文字
-4. 输出 Markdown 文件 + 幻灯片图片目录
+4. 输出 PDF 文件（PPT 原图 + 逐字稿文字），适合上传 NotebookLM
 """
 
 from __future__ import annotations
 
 import argparse
+import io
+import os
 import re
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import numpy as np
+from PIL import Image
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image as RLImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    PageBreak,
+)
 
 from slide_detector import (
     DetectionConfig,
@@ -28,6 +46,44 @@ from slide_detector import (
     load_watermark_template,
 )
 
+
+# ---------------------------------------------------------------------------
+# 中文字体注册
+# ---------------------------------------------------------------------------
+
+def _register_chinese_font() -> str:
+    """注册中文字体，返回字体名称。按优先级搜索系统字体。"""
+    candidates = [
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        # Linux
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        # Windows
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            font_name = "ChineseFont"
+            pdfmetrics.registerFont(TTFont(font_name, path))
+            return font_name
+
+    # 找不到中文字体，使用默认字体（中文可能显示为方框）
+    print("⚠️  未找到中文字体，PDF 中的中文可能无法正确显示")
+    return "Helvetica"
+
+
+# ---------------------------------------------------------------------------
+# SRT 解析
+# ---------------------------------------------------------------------------
 
 @dataclass
 class SrtSegment:
@@ -43,46 +99,172 @@ def parse_srt(srt_path: str | Path) -> list[SrtSegment]:
     content = Path(srt_path).read_text(encoding="utf-8")
     segments: list[SrtSegment] = []
 
-    # SRT 格式: 序号\n开始 --> 结束\n文本\n
     blocks = re.split(r"\n\s*\n", content.strip())
     for block in blocks:
         lines = block.strip().split("\n")
         if len(lines) < 3:
             continue
-
         try:
             index = int(lines[0].strip())
         except ValueError:
             continue
-
-        # 解析时间戳 HH:MM:SS,mmm --> HH:MM:SS,mmm
         time_match = re.match(
             r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})",
             lines[1].strip(),
         )
         if not time_match:
             continue
-
         g = [int(x) for x in time_match.groups()]
         start_sec = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
         end_sec = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
         text = "\n".join(lines[2:]).strip()
-
         if text:
             segments.append(SrtSegment(index, start_sec, end_sec, text))
-
     return segments
 
 
+# ---------------------------------------------------------------------------
+# 自动转录（Whisper）
+# ---------------------------------------------------------------------------
+
+def _transcribe_video(
+    video_path: str | Path,
+    model_name: str = "medium",
+    language: str = "zh",
+) -> list[dict]:
+    """
+    使用 Whisper 转录视频，返回 segments 列表。
+
+    每个 segment 包含 start, end, text 字段。
+    同时在视频同目录保存 .srt 和 .txt 文件供后续使用。
+    """
+    try:
+        import whisper
+    except ImportError:
+        print("错误: 自动转录需要安装 openai-whisper")
+        print("  pip install openai-whisper")
+        sys.exit(1)
+
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        print("错误: 未找到 ffmpeg，请先安装")
+        sys.exit(1)
+
+    from extract_transcript import (
+        extract_audio,
+        save_srt,
+        save_txt,
+    )
+
+    video = Path(video_path)
+
+    print(f"🎤 正在加载 Whisper 模型: {model_name} ...")
+    t0 = time.time()
+    model = whisper.load_model(model_name)
+    print(f"   模型加载完成 ({time.time() - t0:.1f}秒)")
+
+    # 提取音频到临时文件
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(tmp_fd)
+    tmp_audio = Path(tmp_path)
+
+    try:
+        print("   提取音频...")
+        extract_audio(video, tmp_audio)
+
+        print("   转录中...")
+        t1 = time.time()
+        result = model.transcribe(str(tmp_audio), language=language)
+        segments = result.get("segments", [])
+        elapsed = time.time() - t1
+        text_len = sum(len(seg["text"].strip()) for seg in segments)
+        print(f"   转录完成 ({elapsed:.1f}秒, {text_len}字)")
+
+        # 保存 SRT 和 TXT 供后续使用
+        srt_path = video.with_suffix(".srt")
+        txt_path = video.with_suffix(".txt")
+        save_srt(segments, srt_path)
+        save_txt(segments, txt_path)
+        print(f"   → {srt_path.name}")
+        print(f"   → {txt_path.name}")
+
+        return segments
+    finally:
+        if tmp_audio.exists():
+            tmp_audio.unlink()
+
+
+# ---------------------------------------------------------------------------
+# 段落合并
+# ---------------------------------------------------------------------------
+
+def _segments_to_paragraphs(
+    segments: list[dict] | list[SrtSegment],
+    pause_threshold: float = 2.0,
+) -> list[dict]:
+    """
+    将逐字稿片段按停顿合并为自然段落。
+
+    返回段落列表，每个段落包含 text, start, end。
+    """
+    if not segments:
+        return []
+
+    # 统一接口：SrtSegment 或 Whisper dict
+    def _get(seg, key):
+        if isinstance(seg, SrtSegment):
+            return getattr(seg, {"start": "start_sec", "end": "end_sec", "text": "text"}[key])
+        return seg[key]
+
+    paragraphs: list[dict] = []
+    current_texts: list[str] = []
+    current_start = _get(segments[0], "start")
+    current_end = _get(segments[0], "end")
+
+    for i, seg in enumerate(segments):
+        text = _get(seg, "text").strip()
+        if not text:
+            continue
+
+        if i > 0 and _get(seg, "start") - current_end >= pause_threshold:
+            if current_texts:
+                paragraphs.append({
+                    "text": "".join(current_texts),
+                    "start": current_start,
+                    "end": current_end,
+                })
+            current_texts = [text]
+            current_start = _get(seg, "start")
+        else:
+            current_texts.append(text)
+
+        current_end = _get(seg, "end")
+
+    if current_texts:
+        paragraphs.append({
+            "text": "".join(current_texts),
+            "start": current_start,
+            "end": current_end,
+        })
+
+    return paragraphs
+
+
+# ---------------------------------------------------------------------------
+# 幻灯片与逐字稿匹配
+# ---------------------------------------------------------------------------
+
 def match_transcript_to_slides(
     slides: list[SlideSegment],
-    transcript: list[SrtSegment],
+    paragraphs: list[dict],
 ) -> list[tuple[SlideSegment, str]]:
     """
-    将逐字稿片段按时间戳匹配到对应的幻灯片。
+    将段落化的逐字稿按时间戳匹配到对应的幻灯片。
 
     每张幻灯片对应的时间范围：从该幻灯片出现到下一张幻灯片出现。
-    最后一张幻灯片对应到视频结束。
+    段落之间用空行分隔。
     """
     if not slides:
         return []
@@ -91,22 +273,39 @@ def match_transcript_to_slides(
 
     for i, slide in enumerate(slides):
         start_time = slide.timestamp_sec
-        if i + 1 < len(slides):
-            end_time = slides[i + 1].timestamp_sec
-        else:
-            # 最后一张幻灯片：取所有剩余文本
-            end_time = float("inf")
+        end_time = slides[i + 1].timestamp_sec if i + 1 < len(slides) else float("inf")
 
-        # 收集此时间范围内的逐字稿
-        matched_texts: list[str] = []
-        for seg in transcript:
-            # 字幕片段与幻灯片时间范围有交集
-            if seg.end_sec > start_time and seg.start_sec < end_time:
-                matched_texts.append(seg.text)
+        matched: list[str] = []
+        for para in paragraphs:
+            if para["end"] > start_time and para["start"] < end_time:
+                matched.append(para["text"])
 
-        results.append((slide, "\n".join(matched_texts)))
+        results.append((slide, "\n\n".join(matched)))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# PDF 生成
+# ---------------------------------------------------------------------------
+
+def _frame_to_rl_image(frame: np.ndarray, max_width: float) -> RLImage:
+    """将 OpenCV 帧转换为 reportlab Image 对象。"""
+    # BGR -> RGB -> PIL -> bytes
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+
+    # 按最大宽度等比缩放
+    w, h = pil_img.size
+    ratio = max_width / w
+    display_w = max_width
+    display_h = h * ratio
+
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+
+    return RLImage(buf, width=display_w, height=display_h)
 
 
 def _format_time(seconds: float) -> str:
@@ -119,6 +318,108 @@ def _format_time(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def generate_pdf(
+    matched: list[tuple[SlideSegment, str]],
+    output_path: str,
+    title: str = "",
+    subtitle: str = "",
+) -> None:
+    """生成 PDF 文件：每张幻灯片图片 + 对应逐字稿文字。"""
+    font_name = _register_chinese_font()
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+    )
+
+    page_width = A4[0] - 30 * mm  # 可用宽度
+    max_img_width = page_width     # 图片占满可用宽度
+
+    # 样式定义
+    style_title = ParagraphStyle(
+        "SlideTitle",
+        fontName=font_name,
+        fontSize=14,
+        leading=20,
+        spaceAfter=6,
+        textColor="#333333",
+    )
+    style_body = ParagraphStyle(
+        "SlideBody",
+        fontName=font_name,
+        fontSize=10,
+        leading=16,
+        spaceAfter=4,
+        textColor="#444444",
+    )
+    style_header = ParagraphStyle(
+        "Header",
+        fontName=font_name,
+        fontSize=18,
+        leading=24,
+        spaceAfter=8,
+        textColor="#222222",
+    )
+    style_sub = ParagraphStyle(
+        "SubHeader",
+        fontName=font_name,
+        fontSize=10,
+        leading=14,
+        spaceAfter=12,
+        textColor="#888888",
+    )
+
+    elements = []
+
+    # 封面信息
+    if title:
+        elements.append(Paragraph(title, style_header))
+    if subtitle:
+        elements.append(Paragraph(subtitle, style_sub))
+    if title or subtitle:
+        elements.append(Spacer(1, 10 * mm))
+
+    for i, (slide, text) in enumerate(matched):
+        if i > 0:
+            elements.append(PageBreak())
+
+        # 标题行
+        time_str = _format_time(slide.timestamp_sec)
+        elements.append(Paragraph(f"第 {i + 1} 页 [{time_str}]", style_title))
+        elements.append(Spacer(1, 3 * mm))
+
+        # PPT 图片
+        rl_img = _frame_to_rl_image(slide.best_frame, max_img_width)
+        elements.append(rl_img)
+        elements.append(Spacer(1, 5 * mm))
+
+        # 逐字稿文字
+        if text.strip():
+            elements.append(Paragraph("讲解内容：", style_title))
+            elements.append(Spacer(1, 2 * mm))
+            # 按段落分割，每段一个 Paragraph
+            for para in text.split("\n\n"):
+                para = para.strip()
+                if para:
+                    # 转义 XML 特殊字符
+                    safe = (para
+                            .replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+                    elements.append(Paragraph(safe, style_body))
+                    elements.append(Spacer(1, 2 * mm))
+
+    doc.build(elements)
+
+
+# ---------------------------------------------------------------------------
+# 进度条
+# ---------------------------------------------------------------------------
+
 def _print_progress(current: int, total: int) -> None:
     """打印进度条"""
     if total <= 0:
@@ -130,36 +431,41 @@ def _print_progress(current: int, total: int) -> None:
     print(f"\r  检测进度: [{bar}] {pct}%", end="", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
 def generate_notes(
     video_path: str,
-    srt_path: str,
+    srt_path: str | None = None,
     output_path: str | None = None,
     config: DetectionConfig | None = None,
     deduplicate: bool = True,
     watermark_source: str | None = None,
+    whisper_model: str = "medium",
+    whisper_language: str = "zh",
+    pause_threshold: float = 2.0,
 ) -> str:
     """
-    从视频 + SRT 生成结构化笔记（Markdown + 图片）。
+    从视频生成结构化 PDF 笔记（PPT 原图 + 逐字稿）。
+
+    如果提供 srt_path 则读取已有字幕，否则自动调用 Whisper 转录。
 
     Returns:
-        输出 Markdown 文件路径
+        输出 PDF 文件路径
     """
     video = Path(video_path)
-    srt = Path(srt_path)
-
     if not video.exists():
         raise FileNotFoundError(f"找不到视频文件: {video_path}")
-    if not srt.exists():
-        raise FileNotFoundError(f"找不到字幕文件: {srt_path}")
 
-    # 默认输出路径
+    # 默认输出 PDF
     if output_path is None:
-        output_path = str(video.with_suffix(".md"))
+        output_path = str(video.with_suffix(".pdf"))
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # 图片输出目录
+    # 图片输出目录（备份用）
     img_dir = output.parent / f"{output.stem}_slides"
     img_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,18 +474,38 @@ def generate_notes(
     duration_str = _format_time(info["duration_sec"])
     print(f"📹 视频: {video.name} ({duration_str})")
 
-    # 解析 SRT
-    print(f"📝 解析字幕: {srt.name}")
-    transcript = parse_srt(srt_path)
-    print(f"   共 {len(transcript)} 个字幕片段")
+    # --- 逐字稿 ---
+    if srt_path:
+        srt = Path(srt_path)
+        if not srt.exists():
+            raise FileNotFoundError(f"找不到字幕文件: {srt_path}")
+        print(f"📝 读取字幕: {srt.name}")
+        srt_segments = parse_srt(srt_path)
+        print(f"   共 {len(srt_segments)} 个字幕片段")
+        paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+    else:
+        # 检查是否已有同名 SRT 文件
+        auto_srt = video.with_suffix(".srt")
+        if auto_srt.exists():
+            print(f"📝 发现已有字幕: {auto_srt.name}（跳过转录）")
+            srt_segments = parse_srt(str(auto_srt))
+            print(f"   共 {len(srt_segments)} 个字幕片段")
+            paragraphs = _segments_to_paragraphs(srt_segments, pause_threshold)
+        else:
+            print("📝 未找到字幕文件，开始自动转录...")
+            whisper_segments = _transcribe_video(
+                video_path, whisper_model, whisper_language,
+            )
+            paragraphs = _segments_to_paragraphs(whisper_segments, pause_threshold)
 
-    # 加载水印模板
+    print(f"   合并为 {len(paragraphs)} 个自然段落")
+
+    # --- 幻灯片检测 ---
     watermark_tmpl = None
     if watermark_source:
         print(f"🔖 加载水印模板: {watermark_source}")
         watermark_tmpl = load_watermark_template(watermark_source)
 
-    # 检测幻灯片
     print("🔍 正在检测幻灯片...")
     slides = detect_slides(
         video_path, config,
@@ -193,7 +519,6 @@ def generate_notes(
         print("⚠️  未检测到任何幻灯片")
         sys.exit(1)
 
-    # 去重
     if deduplicate:
         original_count = len(slides)
         slides = deduplicate_slides(slides)
@@ -201,68 +526,84 @@ def generate_notes(
         if removed > 0:
             print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
 
-    # 匹配逐字稿
+    # --- 匹配 ---
     print("🔗 匹配逐字稿到幻灯片...")
-    matched = match_transcript_to_slides(slides, transcript)
+    matched = match_transcript_to_slides(slides, paragraphs)
 
-    # 保存幻灯片图片
+    # --- 保存幻灯片图片（备份） ---
     print("🖼️  保存幻灯片图片...")
-    slide_image_paths: list[str] = []
     for i, (slide, _) in enumerate(matched):
-        img_name = f"slide_{i + 1:03d}.jpg"
-        img_path = img_dir / img_name
+        img_path = img_dir / f"slide_{i + 1:03d}.jpg"
         cv2.imwrite(str(img_path), slide.best_frame)
-        slide_image_paths.append(img_name)
 
-    # 生成 Markdown
-    print("📄 生成 Markdown 笔记...")
-    md_lines: list[str] = []
-    md_lines.append(f"# {video.stem}\n")
-    md_lines.append(f"> 来源视频: {video.name}  ")
-    md_lines.append(f"> 时长: {duration_str}  ")
-    md_lines.append(f"> 幻灯片数: {len(matched)}\n")
-
-    for i, ((slide, text), img_name) in enumerate(zip(matched, slide_image_paths)):
-        time_str = _format_time(slide.timestamp_sec)
-        md_lines.append(f"---\n")
-        md_lines.append(f"## 第 {i + 1} 页 [{time_str}]\n")
-        # 图片使用相对路径
-        md_lines.append(f"![幻灯片 {i + 1}]({img_dir.name}/{img_name})\n")
-        if text.strip():
-            md_lines.append(f"### 讲解内容\n")
-            md_lines.append(f"{text}\n")
-        else:
-            md_lines.append(f"*（此页无讲解内容）*\n")
-
-    md_content = "\n".join(md_lines)
-    output.write_text(md_content, encoding="utf-8")
+    # --- 生成 PDF ---
+    print("📄 生成 PDF...")
+    generate_pdf(
+        matched,
+        str(output),
+        title=video.stem,
+        subtitle=f"来源: {video.name} | 时长: {duration_str} | 幻灯片: {len(matched)} 张",
+    )
 
     print(f"\n✅ 完成! 共 {len(matched)} 张幻灯片")
-    print(f"   笔记: {output}")
+    print(f"   PDF:  {output}")
     print(f"   图片: {img_dir}/")
 
     return str(output)
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     """CLI 入口"""
     parser = argparse.ArgumentParser(
-        description="Lecture to Notes — 合并 PPT 幻灯片与逐字稿为结构化笔记",
+        description="Lecture to Notes — 从视频生成 PDF 笔记（PPT + 逐字稿）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 示例:
-  python lecture_to_notes.py lecture.mp4 lecture.srt                      # 基本用法
-  python lecture_to_notes.py lecture.mp4 lecture.srt -o 第一课笔记.md      # 指定输出
-  python lecture_to_notes.py lecture.mp4 lecture.srt -w ppt_sample.jpg    # 使用水印过滤
-  python lecture_to_notes.py lecture.mp4 lecture.srt --dedup              # 去重
+  python lecture_to_notes.py lecture.mp4 -w ppt.jpg --dedup           # 一步完成
+  python lecture_to_notes.py lecture.mp4 --srt lecture.srt --dedup     # 使用已有字幕
+  python lecture_to_notes.py lecture.mp4 -w ppt.jpg --model large     # 用更大模型转录
+  python lecture_to_notes.py lecture.mp4 -w ppt.jpg -o 笔记.pdf       # 指定输出文件
         """,
     )
 
     parser.add_argument("video", help="视频文件路径")
-    parser.add_argument("srt", help="SRT 字幕文件路径（由 extract_transcript.py 生成）")
+    parser.add_argument(
+        "--srt",
+        help="SRT 字幕文件路径（不提供则自动转录）",
+    )
     parser.add_argument(
         "--output", "-o",
-        help="输出 Markdown 文件路径（默认: 与视频同名.md）",
+        help="输出 PDF 文件路径（默认: 与视频同名.pdf）",
+    )
+    parser.add_argument(
+        "--watermark", "-w",
+        help="包含水印的 PPT 截图路径",
+    )
+    parser.add_argument(
+        "--dedup",
+        action="store_true",
+        help="启用幻灯片去重",
+    )
+    parser.add_argument(
+        "--model", "-m",
+        default="medium",
+        choices=["tiny", "base", "small", "medium", "large"],
+        help="Whisper 模型大小（默认: medium）",
+    )
+    parser.add_argument(
+        "--language", "-l",
+        default="zh",
+        help="语言代码（默认: zh）",
+    )
+    parser.add_argument(
+        "--pause-threshold", "-p",
+        type=float,
+        default=2.0,
+        help="段落分段的停顿阈值（秒，默认: 2.0）",
     )
     parser.add_argument(
         "--fps",
@@ -282,15 +623,6 @@ def main():
         default=3,
         help="最少连续稳定帧数（默认: 3）",
     )
-    parser.add_argument(
-        "--watermark", "-w",
-        help="包含水印的 PPT 截图路径",
-    )
-    parser.add_argument(
-        "--dedup",
-        action="store_true",
-        help="启用幻灯片去重",
-    )
 
     args = parser.parse_args()
 
@@ -307,6 +639,9 @@ def main():
         config=config,
         deduplicate=args.dedup,
         watermark_source=args.watermark,
+        whisper_model=args.model,
+        whisper_language=args.language,
+        pause_threshold=args.pause_threshold,
     )
 
 
