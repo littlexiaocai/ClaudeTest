@@ -646,6 +646,12 @@ def main():
         help="最少连续稳定帧数（默认: 3）",
     )
     parser.add_argument(
+        "--watermark-threshold", "-wt",
+        type=float,
+        default=None,
+        help="水印匹配阈值（默认: 0.55，跨视频模板可能需要更低值）",
+    )
+    parser.add_argument(
         "--debug-watermark",
         action="store_true",
         help="输出水印检测调试信息（显示每帧的匹配分数）",
@@ -653,11 +659,14 @@ def main():
 
     args = parser.parse_args()
 
-    config = DetectionConfig(
+    config_kwargs = dict(
         sample_fps=args.fps,
         stability_threshold=args.stability_threshold,
         min_stable_frames=args.min_stable_frames,
     )
+    if args.watermark_threshold is not None:
+        config_kwargs["watermark_match_threshold"] = args.watermark_threshold
+    config = DetectionConfig(**config_kwargs)
 
     generate_notes(
         video_path=args.video,
