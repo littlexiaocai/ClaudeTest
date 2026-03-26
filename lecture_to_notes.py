@@ -322,12 +322,13 @@ def _format_time(seconds: float) -> str:
 
 
 def generate_pdf(
-    matched: list[tuple[SlideSegment, str]],
+    slides: list[SlideSegment],
+    transcript_text: str,
     output_path: str,
     title: str = "",
     subtitle: str = "",
 ) -> None:
-    """生成 PDF 文件：每张幻灯片图片 + 对应逐字稿文字。"""
+    """生成 PDF 文件：先放所有 PPT 图片，再放完整逐字稿。"""
     font_name = _register_chinese_font()
 
     doc = SimpleDocTemplate(
@@ -386,35 +387,33 @@ def generate_pdf(
     if title or subtitle:
         elements.append(Spacer(1, 10 * mm))
 
-    for i, (slide, text) in enumerate(matched):
+    # --- 所有 PPT 图片 ---
+    for i, slide in enumerate(slides):
         if i > 0:
             elements.append(PageBreak())
 
-        # 标题行
         time_str = _format_time(slide.timestamp_sec)
         elements.append(Paragraph(f"第 {i + 1} 页 [{time_str}]", style_title))
         elements.append(Spacer(1, 3 * mm))
 
-        # PPT 图片
         rl_img = _frame_to_rl_image(slide.best_frame, max_img_width)
         elements.append(rl_img)
+
+    # --- 逐字稿 ---
+    if transcript_text.strip():
+        elements.append(PageBreak())
+        elements.append(Paragraph("讲解内容", style_header))
         elements.append(Spacer(1, 5 * mm))
 
-        # 逐字稿文字
-        if text.strip():
-            elements.append(Paragraph("讲解内容：", style_title))
-            elements.append(Spacer(1, 2 * mm))
-            # 按段落分割，每段一个 Paragraph
-            for para in text.split("\n\n"):
-                para = para.strip()
-                if para:
-                    # 转义 XML 特殊字符
-                    safe = (para
-                            .replace("&", "&amp;")
-                            .replace("<", "&lt;")
-                            .replace(">", "&gt;"))
-                    elements.append(Paragraph(safe, style_body))
-                    elements.append(Spacer(1, 2 * mm))
+        for para in transcript_text.split("\n\n"):
+            para = para.strip()
+            if para:
+                safe = (para
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;"))
+                elements.append(Paragraph(safe, style_body))
+                elements.append(Spacer(1, 2 * mm))
 
     doc.build(elements)
 
@@ -529,26 +528,26 @@ def generate_notes(
         if removed > 0:
             print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
 
-    # --- 匹配 ---
-    print("🔗 匹配逐字稿到幻灯片...")
-    matched = match_transcript_to_slides(slides, paragraphs)
+    # --- 合并逐字稿为完整文本 ---
+    transcript_text = "\n\n".join(p["text"] for p in paragraphs)
 
     # --- 保存幻灯片图片（备份） ---
     print("🖼️  保存幻灯片图片...")
-    for i, (slide, _) in enumerate(matched):
+    for i, slide in enumerate(slides):
         img_path = img_dir / f"slide_{i + 1:03d}.jpg"
         cv2.imwrite(str(img_path), slide.best_frame)
 
     # --- 生成 PDF ---
     print("📄 生成 PDF...")
     generate_pdf(
-        matched,
+        slides,
+        transcript_text,
         str(output),
         title=video.stem,
-        subtitle=f"来源: {video.name} | 时长: {duration_str} | 幻灯片: {len(matched)} 张",
+        subtitle=f"来源: {video.name} | 时长: {duration_str} | 幻灯片: {len(slides)} 张",
     )
 
-    print(f"\n✅ 完成! 共 {len(matched)} 张幻灯片")
+    print(f"\n✅ 完成! 共 {len(slides)} 张幻灯片")
     print(f"   PDF:  {output}")
     print(f"   图片: {img_dir}/")
 
