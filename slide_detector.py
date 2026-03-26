@@ -42,7 +42,7 @@ class DetectionConfig:
     subtitle_h: float = 0.08            # 底部字幕条高度占比（跳过）
     watermark_detect_w: float = 0.25    # 水印区域宽度占比（右侧）
     watermark_detect_h: float = 0.12    # 水印区域高度占比（字幕上方）
-    watermark_match_threshold: float = 0.55  # 水印匹配阈值（跨视频模板需要较低阈值）
+    watermark_match_threshold: float = 0.62  # 水印匹配阈值（PPT 帧通常 > 0.64，摄像头帧 < 0.60）
 
 
 def get_video_info(video_path: str | Path) -> dict:
