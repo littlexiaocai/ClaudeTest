@@ -21,7 +21,7 @@
 - scikit-image（SSIM 结构相似度）
 - Pillow（图像处理）
 - ReportLab（PDF 生成，图文混排）
-- OpenAI Whisper（语音转录）
+- faster-whisper（语音转录，CTranslate2 加速）
 - Playwright（浏览器自动化录制）
 - Markdown + YAML frontmatter (Obsidian 兼容)
 

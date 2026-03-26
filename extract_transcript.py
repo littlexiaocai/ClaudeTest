@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """从课程视频中提取语音逐字稿。
 
-使用 OpenAI Whisper 本地模型将视频中的中文语音转录为文字。
+使用 faster-whisper（CTranslate2 优化引擎）将视频中的中文语音转录为文字。
+相比原版 Whisper 快 4-8 倍，精度相同。
 输出两种格式：
   - .txt  按语句自然分段的纯文本（适合喂给大模型）
   - .srt  带时间戳的标准字幕文件（适合回溯定位）
@@ -17,10 +18,10 @@ import time
 from pathlib import Path
 
 try:
-    import whisper
+    from faster_whisper import WhisperModel
 except ImportError:
-    print("错误: 请安装 openai-whisper")
-    print("  pip install openai-whisper")
+    print("错误: 请安装 faster-whisper")
+    print("  pip install faster-whisper")
     sys.exit(1)
 
 
@@ -125,12 +126,44 @@ def save_srt(segments: list, output_path: Path):
     output_path.write_text("\n".join(srt_lines), encoding="utf-8")
 
 
+def _transcribe_with_faster_whisper(
+    audio_path: str,
+    model_name: str = "medium",
+    language: str = "zh",
+) -> list[dict]:
+    """
+    使用 faster-whisper 转录音频，返回与原版 Whisper 兼容的 segments 格式。
+
+    faster-whisper 基于 CTranslate2，CPU 上比原版快 4-8 倍，精度相同。
+    """
+    # auto 让 faster-whisper 自动选择最优计算设备
+    model = WhisperModel(model_name, device="auto", compute_type="auto")
+    raw_segments, info = model.transcribe(
+        audio_path,
+        language=language,
+        beam_size=5,
+        vad_filter=True,  # 过滤无语音片段，进一步提速
+    )
+
+    # 转换为与原版 Whisper 兼容的 dict 格式
+    segments = []
+    for seg in raw_segments:
+        segments.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text,
+        })
+
+    return segments
+
+
 def process_videos(video_paths: list, model_name: str, language: str,
                    force: bool, output_dir=None, pause_threshold: float = 0.8):
     """批量处理视频文件。"""
-    print(f"正在加载 Whisper 模型: {model_name} ...")
+    print(f"正在加载 faster-whisper 模型: {model_name} ...")
     t0 = time.time()
-    model = whisper.load_model(model_name)
+    # 预加载模型（首次调用会下载）
+    model = WhisperModel(model_name, device="auto", compute_type="auto")
     print(f"模型加载完成 ({time.time() - t0:.1f}秒)\n")
 
     total = len(video_paths)
@@ -160,10 +193,23 @@ def process_videos(video_paths: list, model_name: str, language: str,
             print(f"         提取音频...")
             extract_audio(video_path, tmp_audio)
 
-            # Whisper 转录
+            # faster-whisper 转录
             print(f"         转录中...")
-            result = model.transcribe(str(tmp_audio), language=language)
-            segments = result.get("segments", [])
+            raw_segments, info = model.transcribe(
+                str(tmp_audio),
+                language=language,
+                beam_size=5,
+                vad_filter=True,
+            )
+
+            # 转换为 dict 格式
+            segments = []
+            for seg in raw_segments:
+                segments.append({
+                    "start": seg.start,
+                    "end": seg.end,
+                    "text": seg.text,
+                })
 
             # 保存两种格式
             save_txt(segments, txt_path, pause_threshold)
@@ -190,7 +236,7 @@ def process_videos(video_paths: list, model_name: str, language: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="从课程视频中提取语音逐字稿 (使用 Whisper 本地模型)",
+        description="从课程视频中提取语音逐字稿 (使用 faster-whisper 加速引擎)",
         epilog="""示例:
   python extract_transcript.py ./videos/                    # 转录整个目录
   python extract_transcript.py ./videos/第01课.mp4           # 转录单个文件

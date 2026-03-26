@@ -133,20 +133,19 @@ def _transcribe_video(
     language: str = "zh",
 ) -> list[dict]:
     """
-    使用 Whisper 转录视频，返回 segments 列表。
+    使用 faster-whisper 转录视频，返回 segments 列表。
 
     每个 segment 包含 start, end, text 字段。
     同时在视频同目录保存 .srt 和 .txt 文件供后续使用。
     """
     try:
-        import whisper
+        from faster_whisper import WhisperModel
     except ImportError:
-        print("错误: 自动转录需要安装 openai-whisper")
-        print("  pip install openai-whisper")
+        print("错误: 自动转录需要安装 faster-whisper")
+        print("  pip install faster-whisper")
         sys.exit(1)
 
     import shutil
-    import subprocess
 
     if not shutil.which("ffmpeg"):
         print("错误: 未找到 ffmpeg，请先安装")
@@ -160,9 +159,9 @@ def _transcribe_video(
 
     video = Path(video_path)
 
-    print(f"🎤 正在加载 Whisper 模型: {model_name} ...")
+    print(f"🎤 正在加载 faster-whisper 模型: {model_name} ...")
     t0 = time.time()
-    model = whisper.load_model(model_name)
+    model = WhisperModel(model_name, device="auto", compute_type="auto")
     print(f"   模型加载完成 ({time.time() - t0:.1f}秒)")
 
     # 提取音频到临时文件
@@ -176,8 +175,22 @@ def _transcribe_video(
 
         print("   转录中...")
         t1 = time.time()
-        result = model.transcribe(str(tmp_audio), language=language)
-        segments = result.get("segments", [])
+        raw_segments, info = model.transcribe(
+            str(tmp_audio),
+            language=language,
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        # 转换为 dict 格式
+        segments = []
+        for seg in raw_segments:
+            segments.append({
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text,
+            })
+
         elapsed = time.time() - t1
         text_len = sum(len(seg["text"].strip()) for seg in segments)
         print(f"   转录完成 ({elapsed:.1f}秒, {text_len}字)")
