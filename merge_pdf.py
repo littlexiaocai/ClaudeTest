@@ -60,8 +60,6 @@ def merge_pdfs(input_dir: str, output_path: str | None = None) -> str:
     writer = PdfWriter()
 
     for i, pdf in enumerate(pdf_files, 1):
-        reader_pages = len(PdfWriter())  # 临时计数
-        # 直接用 writer.append 合并
         page_count_before = len(writer.pages)
         writer.append(str(pdf))
         page_count = len(writer.pages) - page_count_before
