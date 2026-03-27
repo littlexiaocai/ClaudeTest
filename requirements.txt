@@ -4,3 +4,4 @@ Pillow>=10.0.0
 scikit-image>=0.21.0
 mlx-whisper>=0.4.0
 reportlab>=4.0
+pypdf>=4.0
