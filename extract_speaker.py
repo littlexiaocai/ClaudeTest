@@ -67,7 +67,7 @@ def extract_speaker(
             # 遇到新的说话人标记
             current_speaker = match.group(1)
             all_speakers.add(current_speaker)
-            if current_speaker == speaker and keep_timestamps:
+            if current_speaker == speaker:
                 result_lines.append(line)
         else:
             # 普通文本行，属于当前说话人
