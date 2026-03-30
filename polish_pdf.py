@@ -95,24 +95,12 @@ def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str]:
             for img in page.images:
                 images.append(img.data)
 
+        # 在整页文本中搜索 PPT 标记（不只看第一行，防止 pypdf 提取顺序不同）
+        slide_match = re.search(r"(第\s*\d+\s*页\s*\[[\d:]+\])", text)
+        has_transcript_header = "讲解内容" in text
         lines = text.strip().split("\n")
-        first_line = lines[0].strip() if lines else ""
 
-        if page_idx == 0 and not first_line.startswith("第") and "讲解内容" not in first_line:
-            # 封面页
-            if lines:
-                title = lines[0].strip()
-            if len(lines) > 1:
-                subtitle = lines[1].strip()
-            # 封面可能也包含第一张 PPT
-            slide_match = re.search(r"(第\s*\d+\s*页\s*\[[\d:]+\])", text)
-            if slide_match and images:
-                slide_sections.append({
-                    "label": slide_match.group(1),
-                    "image_bytes": images[0],
-                    "transcript": "",
-                })
-        elif re.match(r"第\s*\d+\s*页", first_line):
+        if slide_match and images:
             # PPT 页 — 先保存上一张的文字稿
             if slide_sections and transcript_parts:
                 slide_sections[-1]["transcript"] = "\n\n".join(
@@ -121,20 +109,33 @@ def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str]:
                 transcript_parts = []
             in_transcript = False
 
-            if images:
-                slide_sections.append({
-                    "label": first_line,
-                    "image_bytes": images[0],
-                    "transcript": "",
-                })
-        elif "讲解内容" in first_line or in_transcript:
+            # 封面页的标题和副标题（第一页且有 PPT 之前的文本）
+            if page_idx == 0 and lines:
+                first_line = lines[0].strip()
+                if not re.match(r"第\s*\d+\s*页", first_line):
+                    title = first_line
+                    if len(lines) > 1 and not re.match(r"第\s*\d+\s*页", lines[1].strip()):
+                        subtitle = lines[1].strip()
+
+            slide_sections.append({
+                "label": slide_match.group(1),
+                "image_bytes": images[0],
+                "transcript": "",
+            })
+        elif has_transcript_header or in_transcript:
             # 逐字稿页
             in_transcript = True
             content = text
-            if "讲解内容" in first_line:
-                content = "\n".join(lines[1:])
+            if has_transcript_header:
+                content = "\n".join(l for l in lines if "讲解内容" not in l)
             if content.strip():
                 transcript_parts.append(content.strip())
+        elif page_idx == 0:
+            # 纯封面页（无 PPT）
+            if lines:
+                title = lines[0].strip()
+            if len(lines) > 1:
+                subtitle = lines[1].strip()
 
     # 处理最后一张 PPT 的文字稿
     if slide_sections and transcript_parts:
