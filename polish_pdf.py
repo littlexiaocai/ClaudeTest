@@ -3,9 +3,9 @@
 PDF 文字稿校对工具 — 基于现有 PDF，用 Claude API 加标点 + 修正同音错字
 
 流程：
-1. 从 PDF 中提取 PPT 图片和文字稿
-2. 文字稿发给 Claude API 校对（加标点 + 改同音错字）
-3. 用原始 PPT 图片 + 校对后文字稿重新生成 PDF
+1. 从 PDF 中提取 PPT 图片和文字稿（保持一一对应关系）
+2. 文字稿并发发给 Claude API 校对（加标点 + 改同音错字）
+3. 用原始 PPT 图片 + 校对后文字稿重新生成 PDF（保持原始结构）
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import io
 import os
 import re
 import sys
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import anthropic
@@ -35,7 +37,7 @@ from reportlab.platypus import (
 
 
 # ---------------------------------------------------------------------------
-# 中文字体注册（复用 lecture_to_notes.py 的逻辑）
+# 中文字体注册
 # ---------------------------------------------------------------------------
 
 def _register_chinese_font() -> str:
@@ -64,26 +66,25 @@ def _register_chinese_font() -> str:
 
 
 # ---------------------------------------------------------------------------
-# PDF 解析：提取图片和文字
+# PDF 解析：提取 PPT + 对应文字稿（保持一一对应）
 # ---------------------------------------------------------------------------
 
-def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str, str]:
+def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str]:
     """
-    从 lecture_to_notes 生成的 PDF 中提取内容。
+    从 lecture_to_notes 生成的 PDF 中提取内容，保持 PPT 和文字稿的对应关系。
 
     Returns:
-        (slides, transcript, title, subtitle)
-        - slides: [{"label": "第 1 页 [02:15]", "image_bytes": bytes}, ...]
-        - transcript: 逐字稿原文
+        (slide_sections, title, subtitle)
+        - slide_sections: [{"label": "第 1 页 [02:15]", "image_bytes": bytes, "transcript": "文字稿..."}, ...]
         - title: 标题
         - subtitle: 副标题
     """
     reader = PdfReader(pdf_path)
-    slides: list[dict] = []
-    transcript_parts: list[str] = []
+    slide_sections: list[dict] = []
     title = ""
     subtitle = ""
     in_transcript = False
+    transcript_parts: list[str] = []
 
     for page_idx, page in enumerate(reader.pages):
         text = page.extract_text() or ""
@@ -94,49 +95,64 @@ def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str, str]:
             for img in page.images:
                 images.append(img.data)
 
-        # 判断页面类型
         lines = text.strip().split("\n")
         first_line = lines[0].strip() if lines else ""
 
-        if page_idx == 0 and not first_line.startswith("第"):
-            # 封面页：提取标题和副标题
+        if page_idx == 0 and not first_line.startswith("第") and "讲解内容" not in first_line:
+            # 封面页
             if lines:
                 title = lines[0].strip()
             if len(lines) > 1:
                 subtitle = lines[1].strip()
             # 封面可能也包含第一张 PPT
-            if re.match(r"第\s*\d+\s*页", text):
-                # 封面和第一张 PPT 在同一页
-                slide_match = re.search(r"(第\s*\d+\s*页\s*\[[\d:]+\])", text)
-                if slide_match and images:
-                    slides.append({
-                        "label": slide_match.group(1),
-                        "image_bytes": images[0],
-                    })
-        elif re.match(r"第\s*\d+\s*页", first_line):
-            # PPT 页
-            label = first_line
-            if images:
-                slides.append({
-                    "label": label,
+            slide_match = re.search(r"(第\s*\d+\s*页\s*\[[\d:]+\])", text)
+            if slide_match and images:
+                slide_sections.append({
+                    "label": slide_match.group(1),
                     "image_bytes": images[0],
+                    "transcript": "",
                 })
+        elif re.match(r"第\s*\d+\s*页", first_line):
+            # PPT 页 — 先保存上一张的文字稿
+            if slide_sections and transcript_parts:
+                slide_sections[-1]["transcript"] = "\n\n".join(
+                    p for p in transcript_parts if p
+                )
+                transcript_parts = []
             in_transcript = False
+
+            if images:
+                slide_sections.append({
+                    "label": first_line,
+                    "image_bytes": images[0],
+                    "transcript": "",
+                })
         elif "讲解内容" in first_line or in_transcript:
             # 逐字稿页
             in_transcript = True
             content = text
             if "讲解内容" in first_line:
-                # 去掉"讲解内容"标题行
                 content = "\n".join(lines[1:])
-            transcript_parts.append(content.strip())
+            if content.strip():
+                transcript_parts.append(content.strip())
 
-    transcript = "\n\n".join(p for p in transcript_parts if p)
-    return slides, transcript, title, subtitle
+    # 处理最后一张 PPT 的文字稿
+    if slide_sections and transcript_parts:
+        slide_sections[-1]["transcript"] = "\n\n".join(
+            p for p in transcript_parts if p
+        )
+
+    # 如果所有文字稿都集中在最后（所有 PPT 之后），均分给各幻灯片
+    slides_with_text = sum(1 for s in slide_sections if s["transcript"])
+    if slides_with_text <= 1 and len(slide_sections) > 1:
+        # 文字稿集中在最后一张，需要保持原样（所有 PPT 后跟全部文字稿）
+        pass
+
+    return slide_sections, title, subtitle
 
 
 # ---------------------------------------------------------------------------
-# Claude API 校对
+# Claude API 校对（并发）
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """你是心理学课程文字稿的校对专家。请对以下语音转录的中文文字稿进行校对：
@@ -150,94 +166,104 @@ SYSTEM_PROMPT = """你是心理学课程文字稿的校对专家。请对以下�
 请直接输出校对后的文本，不要添加任何说明、解释或前缀。"""
 
 
+def _call_api(
+    client: anthropic.Anthropic,
+    batch_text: str,
+    model: str,
+    batch_idx: int,
+    total_batches: int,
+    max_retries: int = 3,
+) -> tuple[int, str]:
+    """单批次 API 调用（带重试），返回 (batch_idx, result)。"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=8096,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": batch_text}],
+            )
+            return batch_idx, response.content[0].text.strip()
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError):
+            if attempt < max_retries:
+                _time.sleep(2 ** attempt)
+            else:
+                raise RuntimeError(
+                    f"第 {batch_idx + 1} 批校对失败（重试 {max_retries} 次后仍超时）"
+                )
+    return batch_idx, batch_text  # 不应到达
+
+
 def polish_text(
     text: str,
     batch_size: int = 2000,
     model: str = "claude-sonnet-4-6",
-    max_retries: int = 3,
+    max_workers: int = 5,
 ) -> str:
     """
-    调用 Claude API 校对文字稿。
+    调用 Claude API 并发校对文字稿。
 
     按段落分批处理，每批不超过 batch_size 字。
-    网络超时自动重试。
+    使用 max_workers 个并发线程加速。
     """
-    import time as _time
-
     client = anthropic.Anthropic(timeout=120.0)
 
-    # 按段落分割
+    # 按段落分割成批次
     paragraphs = text.split("\n\n")
-    batches: list[list[str]] = []
-    current_batch: list[str] = []
+    batches: list[str] = []
+    current_parts: list[str] = []
     current_len = 0
 
     for para in paragraphs:
         para_len = len(para)
-        if current_len + para_len > batch_size and current_batch:
-            batches.append(current_batch)
-            current_batch = [para]
+        if current_len + para_len > batch_size and current_parts:
+            batches.append("\n\n".join(current_parts))
+            current_parts = [para]
             current_len = para_len
         else:
-            current_batch.append(para)
+            current_parts.append(para)
             current_len += para_len
 
-    if current_batch:
-        batches.append(current_batch)
+    if current_parts:
+        batches.append("\n\n".join(current_parts))
 
     if not batches:
         return text
 
-    print(f"📝 文字稿共 {len(text)} 字，分 {len(batches)} 批校对")
+    total = len(batches)
+    print(f"📝 文字稿共 {len(text)} 字，分 {total} 批校对（{max_workers} 并发）")
 
-    polished_parts: list[str] = []
-    total_done = 0
+    # 并发调用 API
+    results: dict[int, str] = {}
+    completed = 0
 
-    for i, batch in enumerate(batches, 1):
-        batch_text = "\n\n".join(batch)
-        batch_chars = len(batch_text)
-        print(f"   [{i}/{len(batches)}] 校对中（{batch_chars} 字）...", end="", flush=True)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_call_api, client, batch, model, i, total): i
+            for i, batch in enumerate(batches)
+        }
 
-        # 带重试的 API 调用
-        result = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=8096,
-                    system=SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": batch_text}],
-                )
-                result = response.content[0].text.strip()
-                break
-            except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
-                if attempt < max_retries:
-                    wait = 2 ** attempt
-                    print(f" 超时，{wait}秒后重试...", end="", flush=True)
-                    _time.sleep(wait)
-                else:
-                    print(f" 失败")
-                    raise RuntimeError(f"第 {i} 批校对失败（重试 {max_retries} 次后仍超时）: {e}")
+        for future in as_completed(futures):
+            batch_idx, result = future.result()
+            results[batch_idx] = result
+            completed += 1
+            print(f"   [{completed}/{total}] 完成第 {batch_idx + 1} 批")
 
-        polished_parts.append(result)
-        total_done += batch_chars
-        print(f" 完成")
-
-    return "\n\n".join(polished_parts)
+    # 按原始顺序拼接
+    return "\n\n".join(results[i] for i in range(total))
 
 
 # ---------------------------------------------------------------------------
-# PDF 重新生成
+# PDF 重新生成（保持原始结构）
 # ---------------------------------------------------------------------------
 
 def regenerate_pdf(
-    slides: list[dict],
-    transcript: str,
+    slide_sections: list[dict],
     output_path: str,
     title: str = "",
     subtitle: str = "",
 ) -> None:
-    """用原始 PPT 图片 + 校对后的文字稿重新生成 PDF。"""
+    """用原始 PPT 图片 + 校对后的文字稿重新生成 PDF，保持一一对应。"""
     font_name = _register_chinese_font()
 
     doc = SimpleDocTemplate(
@@ -278,43 +304,75 @@ def regenerate_pdf(
     if title or subtitle:
         elements.append(Spacer(1, 10 * mm))
 
-    # PPT 图片页
-    for i, slide in enumerate(slides):
-        if i > 0:
+    # 检查文字稿是否集中在最后一张（原始 PDF 是"所有 PPT 后跟全部文字稿"格式）
+    slides_with_text = sum(1 for s in slide_sections if s.get("transcript", "").strip())
+    all_text_at_end = (
+        slides_with_text <= 1
+        and len(slide_sections) > 1
+        and slide_sections[-1].get("transcript", "").strip()
+    )
+
+    if all_text_at_end:
+        # 原始格式：所有 PPT 图片，然后全部文字稿
+        full_transcript = slide_sections[-1]["transcript"]
+
+        for i, section in enumerate(slide_sections):
+            if i > 0:
+                elements.append(PageBreak())
+            elements.append(Paragraph(section["label"], style_title))
+            elements.append(Spacer(1, 3 * mm))
+            elements.append(_image_to_rl(section["image_bytes"], page_width))
+
+        if full_transcript.strip():
             elements.append(PageBreak())
+            elements.append(Paragraph("讲解内容", style_header))
+            elements.append(Spacer(1, 5 * mm))
+            for para in full_transcript.split("\n\n"):
+                para = para.strip()
+                if para:
+                    elements.append(Paragraph(_safe_xml(para), style_body))
+    else:
+        # 一一对应格式：每页 PPT 后跟对应文字稿
+        for i, section in enumerate(slide_sections):
+            if i > 0:
+                elements.append(PageBreak())
 
-        elements.append(Paragraph(slide["label"], style_title))
-        elements.append(Spacer(1, 3 * mm))
+            elements.append(Paragraph(section["label"], style_title))
+            elements.append(Spacer(1, 3 * mm))
+            elements.append(_image_to_rl(section["image_bytes"], page_width))
 
-        # 将图片字节转为 reportlab Image
-        img_buf = io.BytesIO(slide["image_bytes"])
-        pil_img = Image.open(img_buf)
-        w, h = pil_img.size
-        ratio = page_width / w
-        display_w = page_width
-        display_h = h * ratio
-
-        img_buf2 = io.BytesIO()
-        pil_img.save(img_buf2, format="JPEG", quality=90)
-        img_buf2.seek(0)
-        elements.append(RLImage(img_buf2, width=display_w, height=display_h))
-
-    # 校对后的逐字稿
-    if transcript.strip():
-        elements.append(PageBreak())
-        elements.append(Paragraph("讲解内容", style_header))
-        elements.append(Spacer(1, 5 * mm))
-
-        for para in transcript.split("\n\n"):
-            para = para.strip()
-            if para:
-                safe = (para
-                        .replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;"))
-                elements.append(Paragraph(safe, style_body))
+            transcript = section.get("transcript", "").strip()
+            if transcript:
+                elements.append(Spacer(1, 5 * mm))
+                for para in transcript.split("\n\n"):
+                    para = para.strip()
+                    if para:
+                        elements.append(Paragraph(_safe_xml(para), style_body))
 
     doc.build(elements)
+
+
+def _image_to_rl(image_bytes: bytes, max_width: float) -> RLImage:
+    """将图片字节转为 reportlab Image 对象。"""
+    img_buf = io.BytesIO(image_bytes)
+    pil_img = Image.open(img_buf)
+    w, h = pil_img.size
+    ratio = max_width / w
+    display_w = max_width
+    display_h = h * ratio
+
+    out_buf = io.BytesIO()
+    pil_img.save(out_buf, format="JPEG", quality=90)
+    out_buf.seek(0)
+    return RLImage(out_buf, width=display_w, height=display_h)
+
+
+def _safe_xml(text: str) -> str:
+    """转义 XML 特殊字符。"""
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
 
 
 # ---------------------------------------------------------------------------
@@ -325,18 +383,9 @@ def polish_pdf(
     input_path: str,
     output_path: str | None = None,
     model: str = "claude-sonnet-4-6",
+    max_workers: int = 5,
 ) -> str:
-    """
-    校对 PDF 中的文字稿。
-
-    Args:
-        input_path: 输入 PDF 文件路径
-        output_path: 输出 PDF 路径（默认: 输入文件名_校对.pdf）
-        model: Claude 模型名称
-
-    Returns:
-        输出文件路径
-    """
+    """校对 PDF 中的文字稿，保持原始 PPT + 文字稿对应结构。"""
     in_file = Path(input_path)
     if not in_file.exists():
         print(f"错误: 文件不存在: {input_path}")
@@ -346,20 +395,29 @@ def polish_pdf(
         output_path = str(in_file.with_stem(f"{in_file.stem}_校对"))
 
     print(f"📄 读取 PDF: {in_file.name}")
-    slides, transcript, title, subtitle = extract_from_pdf(input_path)
-    print(f"   PPT: {len(slides)} 张，文字稿: {len(transcript)} 字")
+    slide_sections, title, subtitle = extract_from_pdf(input_path)
 
-    if not transcript.strip():
+    total_chars = sum(len(s.get("transcript", "")) for s in slide_sections)
+    slides_with_text = sum(1 for s in slide_sections if s.get("transcript", "").strip())
+    print(f"   PPT: {len(slide_sections)} 张，文字稿: {total_chars} 字（{slides_with_text} 段配对）")
+
+    if total_chars == 0:
         print("⚠️  未找到文字稿内容")
         sys.exit(1)
 
-    # 调用 Claude API 校对
+    # 校对每张 PPT 对应的文字稿
     print("🔤 开始校对...")
-    polished = polish_text(transcript, model=model)
+    for i, section in enumerate(slide_sections):
+        transcript = section.get("transcript", "").strip()
+        if transcript:
+            print(f"\n   --- {section['label']} ---")
+            section["transcript"] = polish_text(
+                transcript, model=model, max_workers=max_workers,
+            )
 
     # 重新生成 PDF
-    print("📄 生成校对后的 PDF...")
-    regenerate_pdf(slides, polished, output_path, title, subtitle)
+    print("\n📄 生成校对后的 PDF...")
+    regenerate_pdf(slide_sections, output_path, title, subtitle)
 
     print(f"\n✅ 完成!")
     print(f"   输出: {output_path}")
@@ -375,6 +433,7 @@ def main():
 示例:
   python polish_pdf.py 课程笔记.pdf                    # 输出 课程笔记_校对.pdf
   python polish_pdf.py 课程笔记.pdf -o 校对后.pdf       # 指定输出
+  python polish_pdf.py 课程笔记.pdf -m claude-haiku-4-5-20251001  # 用 Haiku 更便宜
         """,
     )
 
@@ -388,6 +447,12 @@ def main():
         default="claude-sonnet-4-6",
         help="Claude 模型（默认: claude-sonnet-4-6）",
     )
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=5,
+        help="并发数（默认: 5）",
+    )
 
     args = parser.parse_args()
 
@@ -396,7 +461,7 @@ def main():
         print("  export ANTHROPIC_API_KEY='your-api-key-here'")
         sys.exit(1)
 
-    polish_pdf(args.input, args.output, args.model)
+    polish_pdf(args.input, args.output, args.model, args.workers)
 
 
 if __name__ == "__main__":
