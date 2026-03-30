@@ -154,13 +154,17 @@ def polish_text(
     text: str,
     batch_size: int = 2000,
     model: str = "claude-sonnet-4-6",
+    max_retries: int = 3,
 ) -> str:
     """
     调用 Claude API 校对文字稿。
 
     按段落分批处理，每批不超过 batch_size 字。
+    网络超时自动重试。
     """
-    client = anthropic.Anthropic()
+    import time as _time
+
+    client = anthropic.Anthropic(timeout=120.0)
 
     # 按段落分割
     paragraphs = text.split("\n\n")
@@ -194,14 +198,27 @@ def polish_text(
         batch_chars = len(batch_text)
         print(f"   [{i}/{len(batches)}] 校对中（{batch_chars} 字）...", end="", flush=True)
 
-        response = client.messages.create(
-            model=model,
-            max_tokens=8096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": batch_text}],
-        )
+        # 带重试的 API 调用
+        result = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=8096,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": batch_text}],
+                )
+                result = response.content[0].text.strip()
+                break
+            except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    print(f" 超时，{wait}秒后重试...", end="", flush=True)
+                    _time.sleep(wait)
+                else:
+                    print(f" 失败")
+                    raise RuntimeError(f"第 {i} 批校对失败（重试 {max_retries} 次后仍超时）: {e}")
 
-        result = response.content[0].text.strip()
         polished_parts.append(result)
         total_done += batch_chars
         print(f" 完成")
