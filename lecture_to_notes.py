@@ -412,7 +412,8 @@ def generate_pdf(
 
     # --- 完整逐字稿（自然分段） ---
     if transcript_text.strip():
-        elements.append(PageBreak())
+        if slides:
+            elements.append(PageBreak())
         elements.append(Paragraph("讲解内容", style_header))
         elements.append(Spacer(1, 5 * mm))
 
@@ -567,43 +568,44 @@ def generate_notes(
     print(f"   检测到 {len(slides)} 张幻灯片")
 
     if not slides:
-        raise RuntimeError("未检测到任何幻灯片")
+        print("⚠️  未检测到任何幻灯片，仅生成文字稿 PDF")
+    else:
+        if deduplicate:
+            original_count = len(slides)
+            slides = deduplicate_slides(slides)
+            removed = original_count - len(slides)
+            if removed > 0:
+                print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
 
-    if deduplicate:
-        original_count = len(slides)
-        slides = deduplicate_slides(slides)
-        removed = original_count - len(slides)
-        if removed > 0:
-            print(f"   去重: 移除 {removed} 张重复，剩余 {len(slides)} 张")
+        # 过滤自然场景（讲师摄像头画面）
+        before_scene = len(slides)
+        slides = filter_natural_scenes(slides)
+        scene_removed = before_scene - len(slides)
+        if scene_removed > 0:
+            print(f"   过滤: 移除 {scene_removed} 张摄像头画面，剩余 {len(slides)} 张")
 
-    # 过滤自然场景（讲师摄像头画面）
-    before_scene = len(slides)
-    slides = filter_natural_scenes(slides)
-    scene_removed = before_scene - len(slides)
-    if scene_removed > 0:
-        print(f"   过滤: 移除 {scene_removed} 张摄像头画面，剩余 {len(slides)} 张")
+        # 过滤低内容页（品牌片头/片尾）
+        before_filter = len(slides)
+        slides = filter_low_content_slides(slides)
+        filtered = before_filter - len(slides)
+        if filtered > 0:
+            print(f"   过滤: 移除 {filtered} 张低内容页，剩余 {len(slides)} 张")
 
-    # 过滤低内容页（品牌片头/片尾）
-    before_filter = len(slides)
-    slides = filter_low_content_slides(slides)
-    filtered = before_filter - len(slides)
-    if filtered > 0:
-        print(f"   过滤: 移除 {filtered} 张低内容页，剩余 {len(slides)} 张")
-
-    if not slides:
-        raise RuntimeError("过滤后无剩余幻灯片")
+        if not slides:
+            print("⚠️  过滤后无剩余幻灯片，仅生成文字稿 PDF")
 
     # --- 生成 PDF ---
+    slide_count = len(slides) if slides else 0
     print("📄 生成 PDF...")
     generate_pdf(
         slides,
         transcript_text,
         str(output),
         title=video.stem,
-        subtitle=f"来源: {video.name} | 时长: {duration_str} | 幻灯片: {len(slides)} 张",
+        subtitle=f"来源: {video.name} | 时长: {duration_str} | 幻灯片: {slide_count} 张",
     )
 
-    print(f"\n✅ 完成! 共 {len(slides)} 张幻灯片")
+    print(f"\n✅ 完成! 共 {slide_count} 张幻灯片")
     print(f"   PDF: {output}")
 
     return str(output)
@@ -707,23 +709,19 @@ def main():
         config_kwargs["watermark_match_threshold"] = args.watermark_threshold
     config = DetectionConfig(**config_kwargs)
 
-    try:
-        generate_notes(
-            video_path=args.video,
-            srt_path=args.srt,
-            output_dir=args.output_dir,
-            output_path=args.output,
-            config=config,
-            deduplicate=args.dedup,
-            watermark_source=args.watermark,
-            whisper_model=args.model,
-            whisper_language=args.language,
-            pause_threshold=args.pause_threshold,
-            debug_watermark=args.debug_watermark,
-        )
-    except RuntimeError as e:
-        print(f"⚠️  {e}")
-        sys.exit(1)
+    generate_notes(
+        video_path=args.video,
+        srt_path=args.srt,
+        output_dir=args.output_dir,
+        output_path=args.output,
+        config=config,
+        deduplicate=args.dedup,
+        watermark_source=args.watermark,
+        whisper_model=args.model,
+        whisper_language=args.language,
+        pause_threshold=args.pause_threshold,
+        debug_watermark=args.debug_watermark,
+    )
 
 
 if __name__ == "__main__":
