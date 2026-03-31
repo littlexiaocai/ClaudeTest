@@ -170,8 +170,7 @@ def _has_watermark(
     使用多重策略：
     1. cv2.matchTemplate 模板匹配（同极性背景）
     2. SSIM 整体相似度（同极性备选）
-    3. 反转模板匹配（深色背景 PPT：模板白底深字 → 反转为深底浅字）
-    4. 反转 SSIM（深色背景备选）
+    3. 二值化模板匹配（Otsu 分离文字/背景后比较，不受背景颜色影响）
     任一方法超过阈值即认为有水印。
     """
     corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
@@ -182,44 +181,53 @@ def _has_watermark(
     th, tw = tmpl_gray.shape[:2]
     ch, cw = corner_gray.shape[:2]
 
-    def _template_match(tmpl: np.ndarray) -> float:
-        """对给定模板做模板匹配，返回最大分数。"""
+    def _template_match(target: np.ndarray, tmpl: np.ndarray) -> float:
+        """对给定目标和模板做模板匹配，返回最大分数。"""
         t_h, t_w = tmpl.shape[:2]
-        if t_h <= ch and t_w <= cw:
-            result = cv2.matchTemplate(corner_gray, tmpl, cv2.TM_CCOEFF_NORMED)
+        tgt_h, tgt_w = target.shape[:2]
+        if t_h <= tgt_h and t_w <= tgt_w:
+            result = cv2.matchTemplate(target, tmpl, cv2.TM_CCOEFF_NORMED)
             return float(result.max())
         else:
-            scale = min(cw / t_w, ch / t_h) * 0.8
+            scale = min(tgt_w / t_w, tgt_h / t_h) * 0.8
             new_tw = max(1, int(t_w * scale))
             new_th = max(1, int(t_h * scale))
             tmpl_resized = cv2.resize(tmpl, (new_tw, new_th))
-            if new_th <= ch and new_tw <= cw:
-                result = cv2.matchTemplate(corner_gray, tmpl_resized, cv2.TM_CCOEFF_NORMED)
+            if new_th <= tgt_h and new_tw <= tgt_w:
+                result = cv2.matchTemplate(target, tmpl_resized, cv2.TM_CCOEFF_NORMED)
                 return float(result.max())
         return 0.0
 
     # 策略1：原始模板匹配（白底 PPT）
-    match_score = _template_match(tmpl_gray)
+    match_score = _template_match(corner_gray, tmpl_gray)
 
     # 策略2：SSIM（白底 PPT）
     a = cv2.resize(corner_gray, (tw, th))
     ssim_score = float(ssim(a, tmpl_gray))
 
-    # 策略3：反转模板匹配（深色背景 PPT）
-    # 白底深字 → 反转为深底浅字，与深色背景帧匹配
-    tmpl_inv = np.uint8(255) - tmpl_gray
-    inv_match_score = _template_match(tmpl_inv)
+    # 策略3：二值化模板匹配（支持任意背景颜色）
+    # Otsu 自动分离文字和背景，消除颜色/亮度差异
+    _, tmpl_bin = cv2.threshold(tmpl_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, corner_bin = cv2.threshold(corner_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 策略4：反转 SSIM（深色背景 PPT）
-    inv_ssim_score = float(ssim(a, tmpl_inv))
+    # 二值化后极性未知（文字可能是0或255），两种都试
+    bin_score1 = _template_match(corner_bin, tmpl_bin)
+    bin_score2 = _template_match(corner_bin, np.uint8(255) - tmpl_bin)
+    bin_score = max(bin_score1, bin_score2)
+
+    # 二值化 SSIM（resize 到相同大小后比较）
+    a_bin = cv2.resize(corner_bin, (tw, th))
+    bin_ssim1 = float(ssim(a_bin, tmpl_bin))
+    bin_ssim2 = float(ssim(a_bin, np.uint8(255) - tmpl_bin))
+    bin_ssim = max(bin_ssim1, bin_ssim2)
 
     if debug:
         print(f"    [水印调试] matchTemplate={match_score:.3f}, SSIM={ssim_score:.3f}, "
-              f"invMatch={inv_match_score:.3f}, invSSIM={inv_ssim_score:.3f}, 阈值={threshold}")
+              f"binMatch={bin_score:.3f}, binSSIM={bin_ssim:.3f}, 阈值={threshold}")
 
     # 任一策略超过阈值即通过
     return (match_score >= threshold or ssim_score >= threshold
-            or inv_match_score >= threshold or inv_ssim_score >= threshold)
+            or bin_score >= threshold or bin_ssim >= threshold)
 
 
 def detect_slides(
