@@ -567,8 +567,7 @@ def generate_notes(
     print(f"   检测到 {len(slides)} 张幻灯片")
 
     if not slides:
-        print("⚠️  未检测到任何幻灯片")
-        sys.exit(1)
+        raise RuntimeError("未检测到任何幻灯片")
 
     if deduplicate:
         original_count = len(slides)
@@ -592,8 +591,7 @@ def generate_notes(
         print(f"   过滤: 移除 {filtered} 张低内容页，剩余 {len(slides)} 张")
 
     if not slides:
-        print("⚠️  过滤后无剩余幻灯片")
-        sys.exit(1)
+        raise RuntimeError("过滤后无剩余幻灯片")
 
     # --- 生成 PDF ---
     print("📄 生成 PDF...")
@@ -709,19 +707,23 @@ def main():
         config_kwargs["watermark_match_threshold"] = args.watermark_threshold
     config = DetectionConfig(**config_kwargs)
 
-    generate_notes(
-        video_path=args.video,
-        srt_path=args.srt,
-        output_dir=args.output_dir,
-        output_path=args.output,
-        config=config,
-        deduplicate=args.dedup,
-        watermark_source=args.watermark,
-        whisper_model=args.model,
-        whisper_language=args.language,
-        pause_threshold=args.pause_threshold,
-        debug_watermark=args.debug_watermark,
-    )
+    try:
+        generate_notes(
+            video_path=args.video,
+            srt_path=args.srt,
+            output_dir=args.output_dir,
+            output_path=args.output,
+            config=config,
+            deduplicate=args.dedup,
+            watermark_source=args.watermark,
+            whisper_model=args.model,
+            whisper_language=args.language,
+            pause_threshold=args.pause_threshold,
+            debug_watermark=args.debug_watermark,
+        )
+    except RuntimeError as e:
+        print(f"⚠️  {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
