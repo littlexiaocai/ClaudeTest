@@ -149,6 +149,12 @@ def load_watermark_template(
     return _extract_watermark_region(img, w_ratio, h_ratio, subtitle_h)
 
 
+def _to_edge_map(gray: np.ndarray, blur_ksize: int = 3) -> np.ndarray:
+    """将灰度图转为 Canny 边缘图（极性无关：白到黑和黑到白都产生相同边缘）。"""
+    blurred = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0)
+    return cv2.Canny(blurred, 50, 150)
+
+
 def _has_watermark(
     frame: np.ndarray,
     template: np.ndarray,
@@ -161,9 +167,10 @@ def _has_watermark(
     """
     检测帧的水印区域是否包含水印。
 
-    使用双重策略：
+    使用三重策略：
     1. cv2.matchTemplate 模板匹配（对背景变化鲁棒）
     2. SSIM 整体相似度（作为备选）
+    3. 边缘图模板匹配（极性无关，支持深色背景 PPT）
     任一方法超过阈值即认为有水印。
     """
     corner = _extract_watermark_region(frame, w_ratio, h_ratio, subtitle_h)
@@ -178,11 +185,9 @@ def _has_watermark(
 
     match_score = 0.0
     if th <= ch and tw <= cw:
-        # 模板小于等于区域，直接匹配
         result = cv2.matchTemplate(corner_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
         match_score = float(result.max())
     else:
-        # 模板大于区域，缩放模板到区域大小的 80% 后匹配
         scale = min(cw / tw, ch / th) * 0.8
         new_tw = max(1, int(tw * scale))
         new_th = max(1, int(th * scale))
@@ -196,11 +201,31 @@ def _has_watermark(
     b = tmpl_gray
     ssim_score = float(ssim(a, b))
 
+    # 策略3：边缘图模板匹配（极性无关，支持深色/浅色背景切换）
+    # 边缘图是二值稀疏的，分数天然偏低，使用较低阈值
+    corner_edges = _to_edge_map(corner_gray)
+    tmpl_edges = _to_edge_map(tmpl_gray)
+    edge_threshold = threshold * 0.7
+
+    edge_match_score = 0.0
+    if th <= ch and tw <= cw:
+        result_e = cv2.matchTemplate(corner_edges, tmpl_edges, cv2.TM_CCOEFF_NORMED)
+        edge_match_score = float(result_e.max())
+    else:
+        scale = min(cw / tw, ch / th) * 0.8
+        new_tw = max(1, int(tw * scale))
+        new_th = max(1, int(th * scale))
+        tmpl_e_resized = cv2.resize(tmpl_edges, (new_tw, new_th))
+        if new_th <= ch and new_tw <= cw:
+            result_e = cv2.matchTemplate(corner_edges, tmpl_e_resized, cv2.TM_CCOEFF_NORMED)
+            edge_match_score = float(result_e.max())
+
     if debug:
-        print(f"    [水印调试] matchTemplate={match_score:.3f}, SSIM={ssim_score:.3f}, 阈值={threshold}")
+        print(f"    [水印调试] matchTemplate={match_score:.3f}, SSIM={ssim_score:.3f}, "
+              f"edgeMatch={edge_match_score:.3f}, 阈值={threshold}, 边缘阈值={edge_threshold:.3f}")
 
     # 任一策略超过阈值即通过
-    return match_score >= threshold or ssim_score >= threshold
+    return match_score >= threshold or ssim_score >= threshold or edge_match_score >= edge_threshold
 
 
 def detect_slides(
@@ -368,20 +393,36 @@ def _compute_background_ratio(frame: np.ndarray, tolerance: int = 30) -> float:
     PPT 幻灯片有大面积均匀背景（白色/浅色/纯色），占比通常 > 40%。
     摄像头画面（人物+书架+灯光）几乎没有大面积均匀区域，占比通常 < 20%。
 
-    方法：统计与帧中最常见颜色相近（±tolerance）的像素占比。
+    方法：统计与帧中前两个最常见颜色相近（±tolerance）的像素占比。
+    支持双色背景（如深色底 + 金色装饰区域）。
     """
     # 缩小以加速计算
     small = cv2.resize(frame, (160, 90))
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
     # 用直方图找到最常见的灰度值（众数）
-    hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
     dominant_value = int(np.argmax(hist))
 
-    # 计算在 ±tolerance 范围内的像素占比
-    mask = np.abs(gray.astype(int) - dominant_value) <= tolerance
-    ratio = float(np.count_nonzero(mask)) / mask.size
-    return ratio
+    # 第一峰值：计算在 ±tolerance 范围内的像素占比
+    mask1 = np.abs(gray.astype(int) - dominant_value) <= tolerance
+    ratio1 = float(np.count_nonzero(mask1)) / mask1.size
+
+    # 第二峰值：抑制第一峰值区域后找次要颜色
+    suppressed = hist.copy()
+    lo = max(0, dominant_value - tolerance)
+    hi = min(255, dominant_value + tolerance)
+    suppressed[lo:hi + 1] = 0
+
+    if suppressed.max() > 0:
+        second_value = int(np.argmax(suppressed))
+        mask2 = np.abs(gray.astype(int) - second_value) <= tolerance
+        # 取两个峰值的联合覆盖面积
+        combined = mask1 | mask2
+        ratio_combined = float(np.count_nonzero(combined)) / combined.size
+        return max(ratio1, ratio_combined)
+
+    return ratio1
 
 
 def filter_natural_scenes(
