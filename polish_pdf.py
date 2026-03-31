@@ -109,18 +109,32 @@ def extract_from_pdf(pdf_path: str) -> tuple[list[dict], str, str]:
                 transcript_parts = []
             in_transcript = False
 
-            # 封面页的标题和副标题（第一页且有 PPT 之前的文本）
-            if page_idx == 0 and lines:
-                first_line = lines[0].strip()
-                if not re.match(r"第\s*\d+\s*页", first_line):
-                    title = first_line
-                    if len(lines) > 1 and not re.match(r"第\s*\d+\s*页", lines[1].strip()):
-                        subtitle = lines[1].strip()
+            # 检测幻灯片标记前的标题和副标题（每个视频段落的开头）
+            section_title = ""
+            section_subtitle = ""
+            slide_label_pos = text.find(slide_match.group(1))
+            if slide_label_pos > 0:
+                # 幻灯片标记前有其他文本，可能是段落标题
+                pre_text = text[:slide_label_pos].strip()
+                pre_lines = [l.strip() for l in pre_text.split("\n") if l.strip()]
+                if pre_lines:
+                    first_line = pre_lines[0]
+                    if not re.match(r"第\s*\d+\s*页", first_line):
+                        section_title = first_line
+                        if len(pre_lines) > 1 and not re.match(r"第\s*\d+\s*页", pre_lines[1]):
+                            section_subtitle = pre_lines[1]
+
+            # 第一个段落的标题作为整体标题
+            if not title and section_title:
+                title = section_title
+                subtitle = section_subtitle
 
             slide_sections.append({
                 "label": slide_match.group(1),
                 "image_bytes": images[0],
                 "transcript": "",
+                "section_title": section_title,
+                "section_subtitle": section_subtitle,
             })
         elif has_transcript_header or in_transcript:
             # 逐字稿页
@@ -297,13 +311,17 @@ def regenerate_pdf(
 
     elements = []
 
-    # 封面
-    if title:
-        elements.append(Paragraph(title, style_header))
-    if subtitle:
-        elements.append(Paragraph(subtitle, style_sub))
-    if title or subtitle:
-        elements.append(Spacer(1, 10 * mm))
+    # 检查是否有多个视频段落（每个段落有自己的标题）
+    # 如果各段落已有自己的标题，不需要单独的封面
+    has_section_titles = any(s.get("section_title") for s in slide_sections)
+    if not has_section_titles:
+        # 没有段落标题时，使用全局封面
+        if title:
+            elements.append(Paragraph(title, style_header))
+        if subtitle:
+            elements.append(Paragraph(subtitle, style_sub))
+        if title or subtitle:
+            elements.append(Spacer(1, 10 * mm))
 
     # 检查文字稿是否集中在最后一张（原始 PDF 是"所有 PPT 后跟全部文字稿"格式）
     slides_with_text = sum(1 for s in slide_sections if s.get("transcript", "").strip())
@@ -320,6 +338,17 @@ def regenerate_pdf(
         for i, section in enumerate(slide_sections):
             if i > 0:
                 elements.append(PageBreak())
+
+            # 输出每个视频段落的标题和副标题
+            sec_title = section.get("section_title", "")
+            sec_sub = section.get("section_subtitle", "")
+            if sec_title:
+                elements.append(Paragraph(_safe_xml(sec_title), style_header))
+            if sec_sub:
+                elements.append(Paragraph(_safe_xml(sec_sub), style_sub))
+            if sec_title or sec_sub:
+                elements.append(Spacer(1, 5 * mm))
+
             elements.append(Paragraph(section["label"], style_title))
             elements.append(Spacer(1, 3 * mm))
             elements.append(_image_to_rl(section["image_bytes"], page_width))
@@ -337,6 +366,16 @@ def regenerate_pdf(
         for i, section in enumerate(slide_sections):
             if i > 0:
                 elements.append(PageBreak())
+
+            # 输出每个视频段落的标题和副标题
+            sec_title = section.get("section_title", "")
+            sec_sub = section.get("section_subtitle", "")
+            if sec_title:
+                elements.append(Paragraph(_safe_xml(sec_title), style_header))
+            if sec_sub:
+                elements.append(Paragraph(_safe_xml(sec_sub), style_sub))
+            if sec_title or sec_sub:
+                elements.append(Spacer(1, 5 * mm))
 
             elements.append(Paragraph(section["label"], style_title))
             elements.append(Spacer(1, 3 * mm))
