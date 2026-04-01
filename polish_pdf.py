@@ -187,7 +187,7 @@ def _call_api(
     model: str,
     batch_idx: int,
     total_batches: int,
-    max_retries: int = 3,
+    max_retries: int = 6,
 ) -> tuple[int, str]:
     """单批次 API 调用（带重试），返回 (batch_idx, result)。"""
     for attempt in range(1, max_retries + 1):
@@ -199,12 +199,16 @@ def _call_api(
                 messages=[{"role": "user", "content": batch_text}],
             )
             return batch_idx, response.content[0].text.strip()
+        except anthropic.RateLimitError:
+            wait = min(2 ** attempt, 60)
+            print(f"   ⏳ 第 {batch_idx + 1} 批触发速率限制，等待 {wait}秒后重试...")
+            _time.sleep(wait)
         except (anthropic.APITimeoutError, anthropic.APIConnectionError):
             if attempt < max_retries:
                 _time.sleep(2 ** attempt)
             else:
                 raise RuntimeError(
-                    f"第 {batch_idx + 1} 批校对失败（重试 {max_retries} 次后仍超时）"
+                    f"第 {batch_idx + 1} 批校对失败（重试 {max_retries} 次后仍失败）"
                 )
     return batch_idx, batch_text  # 不应到达
 
@@ -213,7 +217,7 @@ def polish_text(
     text: str,
     batch_size: int = 2000,
     model: str = "claude-sonnet-4-6",
-    max_workers: int = 5,
+    max_workers: int = 3,
 ) -> str:
     """
     调用 Claude API 并发校对文字稿。
